@@ -32,6 +32,10 @@ class Config:
     sam3_precision: str = "bfloat16"
 
     fiftyone_port: int = 5151
+    review_prepare_limit: int = 100
+    review_audit_batch_size: int = 100
+    review_audit_scan_size: int = 10000
+    review_poll_seconds: int = 5
     mlflow_port: int = 5000
     dvc_remote: Path = Path("../vision-loop-dvc-remote")
 
@@ -163,6 +167,10 @@ def config_from_dict(data: dict, config_path: Path) -> Config:
         "grad_accum_steps",
         "autolabel_batch_size",
         "fiftyone_port",
+        "review_prepare_limit",
+        "review_audit_batch_size",
+        "review_audit_scan_size",
+        "review_poll_seconds",
         "mlflow_port",
         "eval_max_detections",
     ):

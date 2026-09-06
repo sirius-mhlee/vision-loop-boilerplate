@@ -70,20 +70,30 @@ def record_path(cfg, sample, record_id: str) -> Path:
     return cfg.storage_dir / "reviews" / image_id / f"{record_id}.json"
 
 
-def approved_annotation(cfg, sample, *, verify_image: bool = True) -> dict:
+def approved_annotation(
+    cfg, sample, *, verify_image: bool = True, allow_auto: bool = False
+) -> dict:
     """Fail closed: a status string alone never makes an annotation releasable."""
-    if sample["review_status"] != "completed":
+    automatic = sample["review_status"] == "auto_accepted"
+    if sample["review_status"] != "completed" and not (automatic and allow_auto):
         raise ValueError("Image is not approved")
     content = annotation_content(sample, cfg.classes)
     digest = content_hash(content)
     if digest != sample["review_approved_hash"]:
         raise ValueError("Ground truth changed after approval")
-    path = record_path(cfg, sample, sample["review_approval_id"])
-    if sha256_file(path) != sample["review_approval_sha256"]:
+    if automatic:
+        from .review_store import read_record
+
+        record = read_record(cfg, sample["review_approval_id"])
+        checksum = content_hash(record)
+    else:
+        path = record_path(cfg, sample, sample["review_approval_id"])
+        checksum = sha256_file(path)
+        record = json.loads(path.read_text())
+    if checksum != sample["review_approval_sha256"]:
         raise ValueError("Approval record changed after approval")
-    record = json.loads(path.read_text())
     if (
-        record.get("action") != "complete"
+        record.get("action") != ("auto_accept" if automatic else "complete")
         or record.get("label_hash") != digest
         or content_hash(record.get("annotation", {})) != digest
         or not record.get("reviewer")

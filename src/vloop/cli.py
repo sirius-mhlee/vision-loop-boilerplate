@@ -43,7 +43,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     review.add_argument(
         "--no-browser", action="store_true", help="Serve the App without opening a browser"
     )
-    for command in (doctor, ingest, autolabel, review):
+    review.add_argument(
+        "--limit", type=int, help="Maximum labels to prepare (default: config, 100)"
+    )
+    review.add_argument(
+        "--queue", choices=["sample", "low_confidence", "empty"], help="Open a focused review queue"
+    )
+    batch = commands.add_parser(
+        "review-batch", help="Preview or resume automatic prediction adoption"
+    )
+    batch.add_argument("--job-id", help="Source autolabel job ID for a new preview")
+    batch.add_argument(
+        "--min-confidence", type=float, help="Minimum confidence of every predicted object"
+    )
+    batch.add_argument(
+        "--sample-rate", type=float, help="Fraction held out for manual review (default: 0.01)"
+    )
+    batch.add_argument("--actor", help="Person choosing the automatic adoption policy")
+    batch.add_argument("--limit", type=int, help="Bound the new preview's input count")
+    batch.add_argument(
+        "--batch-size", type=int, default=100, help="Number of IDs held in memory (1..1000)"
+    )
+    batch.add_argument("--resume", help="Continue a frozen review_batch job")
+    batch.add_argument(
+        "--apply", action="store_true", help="Apply a completed preview with --resume"
+    )
+    audit = commands.add_parser(
+        "review-audit", help="Run a resumable full approval integrity audit"
+    )
+    audit.add_argument("--resume", help="Continue a review_audit job")
+    for command in (doctor, ingest, autolabel, review, batch, audit):
         command.add_argument("--config", default=argparse.SUPPRESS, help="Path to project YAML")
     return parser.parse_args(argv)
 
@@ -64,10 +93,28 @@ def main(argv: list[str] | None = None) -> int:
             from .autolabel import autolabel
 
             report = autolabel(cfg, resume=args.resume, limit=args.limit)
-        else:
+        elif args.command == "review":
             from .review import prepare_review
 
-            report = prepare_review(cfg, job_id=args.job_id)
+            report = prepare_review(cfg, job_id=args.job_id, limit=args.limit, queue=args.queue)
+        elif args.command == "review-batch":
+            from .review_batch import review_batch
+
+            report = review_batch(
+                cfg,
+                job_id=args.job_id,
+                minimum=args.min_confidence,
+                sample_rate=args.sample_rate,
+                actor=args.actor,
+                limit=args.limit,
+                resume=args.resume,
+                apply=args.apply,
+                batch_size=args.batch_size,
+            )
+        else:
+            from .review_audit import review_audit
+
+            report = review_audit(cfg, resume=args.resume)
     except (OSError, ValueError, RuntimeError, yaml.YAMLError) as exc:
         print(f"vloop: {exc}", file=sys.stderr)
         return 2
@@ -96,13 +143,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Processed this attempt: {report.get('processed_this_attempt', 0)}")
         if report.get("config_source"):
             print(f"Frozen config: {report['config_source']}")
-    else:
+    elif args.command == "review":
         print(f"Source job: {report.get('source_job_id') or 'manual review'}")
         print(
             f"Ground truth: {report['initialized']} initialized, {report['preserved']} preserved, "
             f"{report['unavailable']} without a prediction"
         )
         print(f"Approvals invalidated: {report.get('invalidated', 0)}")
+    elif args.command == "review-batch":
+        print(f"Decisions: {report.get('decisions', {})}")
+        print(f"Applied: {report.get('applied', 0)}, outcomes: {report.get('outcomes', {})}")
+        if report["status"] == "ready":
+            print(f"Preview only. Apply: vloop review-batch --resume {report['job_id']} --apply")
+    else:
+        print(f"Audited: {report.get('checked', 0)}, invalidated: {report.get('invalidated', 0)}")
     if report.get("error"):
         print(f"Error: {report['error']}", file=sys.stderr)
     if report["status"] != "completed" and "retry" in report:
@@ -112,8 +166,14 @@ def main(argv: list[str] | None = None) -> int:
         from .review import serve_review
 
         try:
-            serve_review(cfg, no_browser=args.no_browser)
+            serve_review(cfg, no_browser=args.no_browser, queue=args.queue)
         except (OSError, ValueError, RuntimeError) as exc:
             print(f"vloop review: {exc}", file=sys.stderr)
             return 1
-    return 0 if report["status"] == "completed" else 130 if report["status"] == "interrupted" else 1
+    return (
+        0
+        if report["status"] in ("completed", "ready")
+        else 130
+        if report["status"] == "interrupted"
+        else 1
+    )

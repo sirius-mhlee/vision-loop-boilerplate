@@ -30,6 +30,12 @@ class ReviewAction(foo.Operator):
         message = inputs.str(
             "selection", default=f"검수 대상: {len(ids)}장", view=types.MarkdownView()
         )
+        if len(ids) > 100:
+            message.invalid = True
+            message.error_message = (
+                "수동 검수는 한 번에 100장까지 선택하세요. "
+                "대량 채택은 vloop review-batch를 사용하세요."
+            )
         if not ids or not ctx.dataset or not ctx.dataset.info.get("vloop_review_config"):
             message.invalid = True
             message.error_message = "vloop review로 프로젝트를 열고 이미지를 선택하세요."
@@ -48,6 +54,10 @@ class ReviewAction(foo.Operator):
         return types.Property(inputs, view=types.View(label=self.title))
 
     def execute(self, ctx):
+        if len(selected_samples(ctx)) > 100:
+            raise ValueError(
+                "수동 검수는 한 번에 100장까지 가능합니다. 대량 채택은 review-batch를 사용하세요."
+            )
         if self.action == "complete" and ctx.params.get("confirm") is not True:
             raise ValueError("검수한 정답을 확인한 후 완료해주세요.")
         cfg = config_for_dataset(ctx.dataset)

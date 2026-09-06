@@ -1,7 +1,7 @@
 import json
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 from pathlib import Path
 from uuid import uuid4
@@ -16,6 +16,7 @@ STATUSES = {
     "unreviewed": "미검수",
     "in_progress": "수정 중",
     "completed": "완료",
+    "auto_accepted": "자동 예측 채택",
     "excluded": "제외",
 }
 
@@ -64,6 +65,11 @@ def ensure_review_schema(dataset, cfg):
         "reviewed_at": (fo.DateTimeField, {}),
         "review_reason": (fo.StringField, {}),
         "review_history": (fo.ListField, {"subfield": fo.DictField}),
+        "review_kind": (fo.StringField, {}),
+        "review_batch_id": (fo.StringField, {}),
+        "review_queue_reason": (fo.StringField, {}),
+        "review_queue_job": (fo.StringField, {}),
+        "review_checked_at": (fo.DateTimeField, {}),
     }
     for name, (field_type, kwargs) in fields.items():
         if not dataset.has_sample_field(name):
@@ -86,6 +92,20 @@ def ensure_review_schema(dataset, cfg):
             dataset.update_label_schema(field, dict(label_schema, read_only=True))
     dataset.classes["ground_truth"] = [c.name for c in cfg.classes]
     dataset.info["vloop_review_config"] = cfg.to_dict()
+    if dataset.info.get("vloop_review_schema_version", 1) < 2:
+        # Adopt legacy manual labels without transferring any masks to Python.
+        dataset._sample_collection.update_many(
+            {"review_initialized": {"$ne": True}, "ground_truth": {"$ne": None}},
+            {"$set": {"review_initialized": True}},
+        )
+        dataset.info["vloop_review_schema_version"] = 2
+    collection = dataset._sample_collection
+    collection.create_index(
+        [("review_status", 1), ("last_modified_at", 1), ("_id", 1), ("review_checked_at", 1)]
+    )
+    collection.create_index([("review_status", 1), ("_id", 1)])
+    collection.create_index([("review_initialized", 1), ("_id", 1)])
+    collection.create_index([("review_queue_reason", 1), ("_id", 1)])
     dataset.save()
     for status, title in STATUSES.items():
         name = f"vloop-{status}"
@@ -93,6 +113,10 @@ def ensure_review_schema(dataset, cfg):
             dataset.save_view(
                 name, dataset.match(fo.ViewField("review_status") == status), description=title
             )
+    for reason in ("sample", "low_confidence", "empty"):
+        name = f"vloop-queue-{reason}"
+        if not dataset.has_saved_view(name):
+            dataset.save_view(name, dataset.match(fo.ViewField("review_queue_reason") == reason))
 
 
 def _save_change(dataset, sample, changes: dict, event: dict):
@@ -105,11 +129,17 @@ def _save_change(dataset, sample, changes: dict, event: dict):
         "review_approval_id": raw.get("review_approval_id"),
         "last_modified_at": raw.get("last_modified_at"),
     }
-    changes = dict(changes, last_modified_at=datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    changes = dict(changes, last_modified_at=now)
+    if changes.get("review_status") in ("completed", "auto_accepted"):
+        changes["review_checked_at"] = now
+    update = {"$set": changes}
+    if raw.get("review_history") is None:
+        changes["review_history"] = [event]
+    else:
+        update["$push"] = {"review_history": event}
     # A single MongoDB update prevents a stale approval from overwriting a concurrent edit.
-    result = dataset._sample_collection.update_one(
-        expected, {"$set": changes, "$push": {"review_history": event}}
-    )
+    result = dataset._sample_collection.update_one(expected, update)
     if result.matched_count != 1:
         raise RuntimeError("Image changed during review; reload it and try again")
     sample.reload()
@@ -122,6 +152,8 @@ def _clear_approval():
         review_approval_sha256=None,
         reviewed_by=None,
         reviewed_at=None,
+        review_kind=None,
+        review_checked_at=None,
     )
 
 
@@ -161,9 +193,18 @@ def _transition(cfg, dataset, sample, action, reviewer, note="", confirm_empty=F
             review_approval_id=record_id,
             reviewed_by=reviewer,
             reviewed_at=now,
+            review_kind="manual",
+            review_queue_reason=None,
         )
     elif action in ("start", "exclude", "invalidate"):
         changes["review_status"] = "excluded" if action == "exclude" else "in_progress"
+        if action == "exclude":
+            changes["review_queue_reason"] = None
+        if action == "start" and sample["ground_truth"] is None:
+            source_job = sample["review_queue_job"] or dataset.info.get("vloop_review_source_job")
+            if not sample["review_initialized"] and source_job:
+                initialize_sample(cfg, dataset, sample, source_job)
+                sample.reload()
         if action == "start" and sample["ground_truth"] is None:
             changes.update(
                 ground_truth=fo.Detections(detections=[]).to_mongo().to_dict(),
@@ -173,6 +214,7 @@ def _transition(cfg, dataset, sample, action, reviewer, note="", confirm_empty=F
     else:
         raise ValueError(f"Unknown review action: {action}")
     path = record_path(cfg, sample, record_id)
+    record["source"] = changes.get("ground_truth_source", sample["ground_truth_source"])
     write_json(path, record)
     if action == "complete":
         changes["review_approval_sha256"] = sha256_file(path)
@@ -185,13 +227,19 @@ def change_reviews(cfg, sample_ids, action, reviewer, *, note="", confirm_empty=
         raise ValueError("Choose start, complete, or exclude")
     if not reviewer or not reviewer.strip():
         raise ValueError("Enter a reviewer name")
-    sample_ids = list(dict.fromkeys(sample_ids))
-    if not sample_ids:
+    selected = set()
+    for sample_id in sample_ids:
+        selected.add(sample_id)
+        if len(selected) > 100:
+            raise ValueError(
+                "Manual review supports up to 100 images; use review-batch for adoption"
+            )
+    if not selected:
         raise ValueError("Open or select images to review")
     with project_lock(cfg):
         dataset = load_review_dataset(cfg)
         result = {"changed": 0, "failed": 0, "errors": []}
-        for sample_id in sample_ids:
+        for sample_id in sorted(selected):
             try:
                 _transition(
                     cfg, dataset, dataset[sample_id], action, reviewer.strip(), note, confirm_empty
@@ -203,22 +251,120 @@ def change_reviews(cfg, sample_ids, action, reviewer, *, note="", confirm_empty=
         return result
 
 
-def audit_reviews(cfg, dataset=None):
-    import fiftyone as fo
-
+def audit_reviews(cfg, dataset=None, *, after=None, upper=None, limit=None):
     dataset = dataset or load_review_dataset(cfg)
     invalidated = 0
-    for sample in dataset.match(fo.ViewField("review_status") == "completed"):
+    query = {"review_status": {"$in": ["completed", "auto_accepted"]}}
+    if after is not None or upper is not None:
+        from bson import ObjectId
+
+        query["_id"] = {}
+        if after:
+            query["_id"]["$gt"] = ObjectId(after)
+        if upper:
+            query["_id"]["$lte"] = ObjectId(upper)
+    view = dataset.match(query).sort_by("id")
+    if limit:
+        view = view.limit(limit)
+    for sample in view:
         sample.reload()
         try:
-            approved_annotation(cfg, sample)
+            approved_annotation(cfg, sample, allow_auto=True)
         except (ValueError, OSError, KeyError) as exc:
             _transition(cfg, dataset, sample, "invalidate", "vloop", str(exc))
             invalidated += 1
     return invalidated
 
 
-def prepare_review(cfg, job_id=None):
+def audit_changed_reviews(cfg, dataset):
+    """Follow indexed modification timestamps; never rehash all approved images on a timer."""
+    from bson import ObjectId
+
+    path = cfg.storage_dir / "reviews" / "audit-cursor.json"
+    cursor = json.loads(path.read_text()) if path.exists() else None
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=2)
+    query = {
+        "review_status": {"$in": ["completed", "auto_accepted"]},
+        "last_modified_at": {"$lte": cutoff},
+    }
+    if cursor:
+        stamp = datetime.fromisoformat(cursor["at"])
+        query["$or"] = [
+            {"last_modified_at": {"$gt": stamp}},
+            {"last_modified_at": stamp, "_id": {"$gt": ObjectId(cursor["id"])}},
+        ]
+    rows = (
+        dataset._sample_collection.find(query, {"last_modified_at": 1, "review_checked_at": 1})
+        .sort([("last_modified_at", 1), ("_id", 1)])
+        .limit(cfg.review_audit_scan_size)
+        .batch_size(500)
+    )
+    invalidated = 0
+    checked = 0
+    last = None
+    for row in rows:
+        last = row
+        if row.get("review_checked_at") != row["last_modified_at"]:
+            checked += 1
+            sample = dataset[str(row["_id"])]
+            sample.reload()
+            if sample["review_status"] in ("completed", "auto_accepted"):
+                try:
+                    approved_annotation(cfg, sample, allow_auto=True)
+                except (ValueError, OSError, KeyError) as exc:
+                    _transition(cfg, dataset, sample, "invalidate", "vloop", str(exc))
+                    invalidated += 1
+                else:
+                    # Updating the check marker must not change the annotation timestamp.
+                    dataset._sample_collection.update_one(
+                        {"_id": row["_id"], "last_modified_at": row["last_modified_at"]},
+                        {"$set": {"review_checked_at": row["last_modified_at"]}},
+                    )
+        if checked >= cfg.review_audit_batch_size:
+            break
+    rows.close()
+    if last:
+        write_json(path, {"at": last["last_modified_at"].isoformat(), "id": str(last["_id"])})
+    return invalidated
+
+
+def initialize_sample(cfg, dataset, sample, job_id):
+    if (
+        sample["ground_truth"] is not None
+        or sample["review_initialized"]
+        or any(event.get("action") != "queue" for event in (sample["review_history"] or []))
+    ):
+        return False
+    field = f"pred_{job_id}"
+    if not dataset.has_sample_field(field) or sample[field] is None:
+        return False
+    path = cfg.storage_dir / "runs" / job_id / "predictions" / f"{sample['image_id']}.json"
+    checksum = sha256_file(path)
+    if checksum != sample[f"{field}_sha256"]:
+        raise ValueError("Saved prediction was modified")
+    prediction = json.loads(path.read_text())
+    if prediction["image_id"] != sample["image_id"]:
+        raise ValueError("Prediction image ID differs from registered image")
+    truth = to_detections(prediction)
+    source = {"kind": "autolabel", "job_id": job_id, "field": field, "sha256": checksum}
+    _save_change(
+        dataset,
+        sample,
+        {
+            "ground_truth": truth.to_mongo().to_dict(),
+            "ground_truth_source": source,
+            "review_initialized": True,
+            "review_status": "unreviewed",
+        },
+        {"action": "initialize", "at": datetime.now(timezone.utc).isoformat(), "source": source},
+    )
+    return True
+
+
+def prepare_review(cfg, job_id=None, *, limit=None, queue=None):
+    limit = cfg.review_prepare_limit if limit is None else limit
+    if type(limit) is not int or limit < 1:
+        raise ValueError("Review preparation limit must be positive")
     with project_lock(cfg):
         directory, report = start_run(cfg, "review")
         report.update(initialized=0, preserved=0, unavailable=0)
@@ -234,14 +380,25 @@ def prepare_review(cfg, job_id=None):
             ):
                 raise ValueError("Choose a registered auto-labeling job ID")
             report["source_job_id"] = job_id
-            report["invalidated"] = audit_reviews(cfg, dataset)
+            dataset.info["vloop_review_source_job"] = job_id
+            dataset.save()
+            report["invalidated"] = audit_changed_reviews(cfg, dataset)
             field = f"pred_{job_id}" if job_id else None
-            for sample in dataset.iter_samples():
+            query = {"review_initialized": {"$ne": True}}
+            if field and not queue:
+                query[f"{field}_sha256"] = {"$ne": None}
+            if queue:
+                query["review_queue_reason"] = queue
+            report.update(limit=limit, queue=queue)
+            for sample in dataset.match(query).sort_by("id").limit(limit):
                 if (
                     sample["ground_truth"] is not None
                     or sample["review_initialized"]
-                    or sample["review_history"]
-                    or sample["review_status"] in ("in_progress", "completed", "excluded")
+                    or any(
+                        event.get("action") != "queue" for event in (sample["review_history"] or [])
+                    )
+                    or sample["review_status"]
+                    in ("in_progress", "completed", "auto_accepted", "excluded")
                 ):
                     if not sample["review_initialized"]:
                         changes = {"review_initialized": True}
@@ -258,36 +415,16 @@ def prepare_review(cfg, job_id=None):
                         )
                     report["preserved"] += 1
                     continue
-                if field is None or sample[field] is None:
+                source_job = sample["review_queue_job"] or job_id
+                source_field = f"pred_{source_job}" if source_job else None
+                if (
+                    source_field is None
+                    or not dataset.has_sample_field(source_field)
+                    or sample[source_field] is None
+                ):
                     report["unavailable"] += 1
                     continue
-                path = (
-                    cfg.storage_dir / "runs" / job_id / "predictions" / f"{sample['image_id']}.json"
-                )
-                checksum = sha256_file(path)
-                if checksum != sample[f"{field}_sha256"]:
-                    raise ValueError("Saved prediction was modified")
-                prediction = json.loads(path.read_text())
-                if prediction["image_id"] != sample["image_id"]:
-                    raise ValueError("Prediction image ID differs from registered image")
-                truth = to_detections(prediction)
-                source = {"kind": "autolabel", "job_id": job_id, "field": field, "sha256": checksum}
-                _save_change(
-                    dataset,
-                    sample,
-                    {
-                        "ground_truth": truth.to_mongo().to_dict(),
-                        "ground_truth_source": source,
-                        "review_initialized": True,
-                        "review_status": "unreviewed",
-                    },
-                    {
-                        "action": "initialize",
-                        "at": datetime.now(timezone.utc).isoformat(),
-                        "source": source,
-                    },
-                )
-                report["initialized"] += 1
+                report["initialized"] += int(initialize_sample(cfg, dataset, sample, source_job))
             report["status"] = "completed"
         except KeyboardInterrupt:
             report.update(status="interrupted", error="Review preparation interrupted")
@@ -296,17 +433,18 @@ def prepare_review(cfg, job_id=None):
         return finish_run(directory, report)
 
 
-def serve_review(cfg, *, no_browser=False):
+def serve_review(cfg, *, no_browser=False, queue=None):
     fo = configure_fiftyone(cfg)
     dataset = load_review_dataset(cfg)
-    session = fo.launch_app(dataset, address="127.0.0.1", port=cfg.fiftyone_port, remote=no_browser)
+    view = dataset.match(fo.ViewField("review_queue_reason") == queue) if queue else dataset
+    session = fo.launch_app(view, address="127.0.0.1", port=cfg.fiftyone_port, remote=no_browser)
     print(f"Review: http://127.0.0.1:{cfg.fiftyone_port} (Ctrl+C to stop)", flush=True)
     try:
         while True:
-            time.sleep(2)
+            time.sleep(cfg.review_poll_seconds)
             try:
                 with project_lock(cfg):
-                    changed = audit_reviews(cfg, dataset)
+                    changed = audit_changed_reviews(cfg, dataset)
                 if changed:
                     session.refresh()
                     print(f"Review required again: {changed} images", flush=True)

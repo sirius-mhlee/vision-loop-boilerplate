@@ -5,7 +5,8 @@ A boilerplate for an iterative computer vision pipeline covering auto-labeling, 
 로컬 이미지의 자동 라벨링 → 검수 → 데이터 버전 저장 → 학습 → 평가를 반복하는 프로젝트입니다.
 원본 [구현 계획](docs/PLAN.md)과 현재 [진행 상태](docs/PROGRESS.md)를 함께 관리합니다.
 
-현재 실행 가능한 명령은 `doctor`, `ingest`, `autolabel`, `review`입니다. RTX 5060 Laptop
+현재 실행 가능한 명령은 `doctor`, `ingest`, `autolabel`, `review`, `review-batch`,
+`review-audit`입니다. RTX 5060 Laptop
 8 GB에서 SAM 3 추론·재개를 검증했고, FiftyOne 브라우저에서 마스크 수정·승인·재검수를
 확인했습니다. DVC 릴리스, RF-DETR 학습, MLflow 평가는 후속 단계입니다.
 
@@ -183,6 +184,7 @@ vloop review
 vloop review --job-id <AUTO_LABEL_JOB_ID>
 vloop review --prepare-only
 vloop review --no-browser
+vloop review --queue sample --limit 100
 ```
 
 등록된 데이터셋에 검수용 필드·Annotation Schema·operator·상태별 저장 뷰를 준비하고
@@ -191,7 +193,10 @@ vloop review --no-browser
 검수 서버는 터미널에서 계속 실행되며 `Ctrl+C`로 종료합니다.
 
 `--job-id`를 생략하면 가장 최근에 등록된 자동 라벨링 작업을 선택하고 ID를 출력합니다.
-선택한 작업에서 성공한 예측만 `ground_truth`로 복사합니다. 기존 정답이나 검수 이력이
+선택한 작업에서 성공한 예측 중 아직 초기화하지 않은 이미지 **최대 100장**을 준비합니다.
+범위는 `--limit` 또는 YAML의 `review_prepare_limit`로 바꿉니다. 출력 건수는 이번에 살펴본
+범위의 결과입니다. 준비되지 않은 이미지는 `검수 시작` operator를 실행할 때 해당 예측을
+복사합니다. 기존 정답이나 검수 이력이
 있으면 그대로 보존하며, 한 번 초기화한 정답을 비우거나 삭제해도 재실행으로 덮어쓰지 않습니다.
 원래 `pred_<job-id>`는 별도 필드로 남기고 Annotation Schema에서 읽기 전용으로 설정합니다.
 실패·미완료 예측은 빈 정답으로 바꾸지 않습니다.
@@ -208,7 +213,8 @@ vloop review --no-browser
    체크합니다. 예측이 없는 이미지의 빈 정답은 먼저 검수 시작으로 명시적으로 생성해야 합니다.
 
 이미지를 확대한 상태에서는 그 이미지 한 장, 목록에서는 직접 선택한 이미지만 처리합니다.
-아무 이미지도 선택하지 않으면 실행할 수 없습니다. 결과 창의 성공·실패 건수와 원인을 확인합니다.
+수동 operator는 한 번에 최대 100장까지 처리합니다. 아무 이미지도 선택하지 않으면 실행할 수
+없습니다. 대량 예측 채택에는 아래 CLI를 사용합니다. 결과 창의 성공·실패 건수와 원인을 확인합니다.
 FiftyOne 1.21에서 펼쳐 둔 이미지의 상태 표시가 이전 값을 유지할 수 있으므로, 이 경우 브라우저를
 새로고침합니다. DB에 기록된 승인 여부는 operator 결과와 아래 승인 검증을 따릅니다.
 
@@ -216,8 +222,68 @@ FiftyOne 1.21에서 펼쳐 둔 이미지의 상태 표시가 이전 값을 유�
 |---|---|
 | `vloop-unreviewed` | 미검수 |
 | `vloop-in_progress` | 수정 중 |
-| `vloop-completed` | 완료 |
+| `vloop-completed` | 사람이 검수 완료 |
+| `vloop-auto_accepted` | 자동 예측 일괄 채택 |
 | `vloop-excluded` | 제외 |
+| `vloop-queue-sample` | 고신뢰도 예측에서 무작위로 뽑은 검수 표본 |
+| `vloop-queue-low_confidence` | 기준 이하 객체가 있거나 신뢰도 정보가 없는 이미지 |
+| `vloop-queue-empty` | 객체를 예측하지 못한 이미지 |
+
+### 대량 이미지의 일괄 채택
+
+브라우저에서 전체 선택할 필요 없이 자동 라벨링 작업 ID로 처리합니다. 우선 **미리보기**를
+만들어 예상 건수를 확인합니다. 아래 임계값과 표본 비율은 실행 방법을 보여주는 예시입니다.
+
+```shell
+vloop review-batch --job-id <AUTO_LABEL_JOB_ID> --min-confidence 0.9 --sample-rate 0.001 --actor mhlee
+```
+
+- 예측의 모든 객체가 지정한 신뢰도 이상이면 채택 후보입니다. 그중 `sample-rate` 비율은
+  검수 표본으로 남깁니다. `0.001`은 고신뢰도 후보의 약 0.1%이며 정확한 고정 장수는 아닙니다.
+  이미지 ID와 `seed`로 선택하므로 중단·재개와 배치 크기 변경에도 같은 표본을 선택합니다.
+- 낮은 신뢰도와 빈 예측은 수동 검수 목록에 남깁니다. 빈 예측은 자동으로 정답 처리하지 않습니다.
+  높은 신뢰도만으로 누락된 객체를 찾아낼 수 없으므로, 표본은 직접 살펴봐야 합니다.
+- 기존 수동 정답·검수 이력·수정된 자동 정답은 보존합니다. 미리보기 이후 수정된 이미지도
+  적용할 때 건너뜁니다. 실패한 추론은 성공 예측이 없으므로 대상에 포함되지 않습니다.
+- 미리보기는 정답을 복사하거나 승인하지 않습니다. `decisions`의 `accept`, `sample`,
+  `low_confidence`, `empty`, `preserve`, `error` 건수를 확인합니다. 미리보기에 오류가 있어도
+  나머지 유효한 대상은 처리할 수 있으며 오류 행은 적용하지 않습니다.
+- 실제 적용은 미리보기 결과의 `review_batch_...` ID를 지정합니다. 자동 라벨링 ID와 다릅니다.
+
+```shell
+vloop review-batch --resume <REVIEW_BATCH_JOB_ID> --apply
+```
+
+채택한 정답은 `ground_truth`에 저장하고 상태를 **`auto_accepted`**, 종류를 `automatic`으로
+기록합니다. 직접 검수한 `completed`와 별개의 상태입니다. 정책을 선택한 사람, 원본 예측 해시,
+정답 해시, 작업 ID와 기준을 `reviews/records.sqlite3`에 기록합니다. 이후 직접 검수 완료를
+실행하면 별도의 수동 승인 기록이 생깁니다.
+
+적용 후 필요한 검수 목록만 엽니다. 표본과 낮은 신뢰도·빈 예측의 마스크는 화면을 준비하거나
+검수를 시작할 때 복사하므로 미리 전부 복제하지 않습니다.
+
+```shell
+vloop review --queue sample
+vloop review --queue low_confidence
+vloop review --queue empty
+```
+
+입력 ID·예측 해시·수정 시점·기준과 진행 상태를 작업별 SQLite에 저장합니다. 메모리에는
+`--batch-size`개 ID(기본 100, 최대 1000)와 처리 중인 이미지의 라벨을 유지합니다.
+미리보기를 중단했으면 `--resume ID`, 적용을 중단했으면 `--resume ID --apply`로 이어갑니다.
+재개 시 원본 작업·기준·검수자·대상을 바꿀 수 없습니다. 판정·승인 코드의 해시도 고정하므로
+해당 코드를 수정했다면 새 미리보기를 만듭니다. 다른 기준에도 새 미리보기를 사용합니다.
+DB 반영 직후 중단돼도 재개 시 같은 이미지를 중복 채택하지 않습니다.
+
+`--limit N`은 새 미리보기의 대상 수를 제한합니다. 스냅샷 생성 자체가 끝나기 전에 중단되면
+새 미리보기를 만듭니다. 적용 실패 행은 `outcome=failed`로 남으며, 원인을 해결한 뒤 새
+미리보기를 만들어 처리합니다. 대상별 사유는 작업의 `samples.sqlite3`에서 조회할 수 있습니다.
+
+```sql
+SELECT image_id, decision, outcome, detail
+FROM inputs
+WHERE decision IN ('preserve', 'error') OR outcome IN ('preserved', 'failed');
+```
 
 ### 승인 기록과 재검수
 
@@ -231,11 +297,27 @@ FiftyOne의 브러시는 화면 크기에 맞춘 마스크와 소수 좌표 박�
 전체 이미지 좌표의 COCO RLE를 만듭니다. 편집기가 저장한 원래 박스와 마스크 RLE도 함께
 보존합니다. 이 변환은 자동 예측 원본을 변경하지 않습니다.
 
-서버는 2초 간격으로 완료된 이미지의 라벨·관리 이미지·승인 기록을 검사합니다. 변경이 발견되면
-`in_progress`로 되돌려 재승인을 요구합니다. 서버가 꺼져 있는 동안의 변경은 다음 실행에서
-검사합니다. 현재는 완료 이미지 전체를 검사하므로 많은 이미지에서는 검사 시간이 늘어납니다.
-후속 릴리스 구현은 새로 읽은 샘플에 `approved_annotation()`을 호출해 승인 내용과의 일치를
-다시 확인해야 합니다. 현재 단계에는 릴리스 명령이 없습니다.
+서버는 기본 5초 간격으로 수정 시점 인덱스에서 최대 10,000건의 메타데이터를 스트리밍으로 읽고,
+실제 변경된 승인은 최대 100건 검사합니다.
+새로 승인한 그대로의 이미지는 파일·마스크를 다시 읽지 않고, 이후 DB 수정이 있는 승인 데이터만
+확인합니다. 내용이 달라지면 `in_progress`로 되돌립니다. 조회 위치를 저장하므로 서버가 꺼져
+있던 동안의 DB 수정도 이어서 검사합니다. 쌓인 변경이 많으면 순서대로 처리하므로 즉시는 아닙니다.
+간격과 건수는 `review_poll_seconds`, `review_audit_scan_size`, `review_audit_batch_size`로 조절합니다.
+
+DB 수정 시점을 바꾸지 않는 외부 파일 변경이나 직접 DB 조작은 이 증분 검사만으로 발견할 수
+없습니다. 이미지·승인 기록까지 전부 확인할 때는 중단·재개 가능한 전체 검사를 실행합니다.
+
+```shell
+vloop review-audit
+vloop review-audit --resume <REVIEW_AUDIT_JOB_ID>
+```
+
+전체 검사도 ID 범위를 이어가며 정해진 건수만 메모리에 읽습니다. 인덱스를 이용하는 범위 조회는
+[MongoDB의 범위 기반 페이지 조회](https://www.mongodb.com/docs/manual/reference/method/cursor.skip/)
+방식을 따릅니다. 후속 릴리스는 새로 읽은 각 샘플에 `approved_annotation()`을 호출해 내용을
+다시 확인해야 합니다. 이 함수는 기본적으로 수동 승인만 허용하며, 자동 채택을 포함하려면
+`allow_auto=True`를 명시해야 합니다. 검증·테스트 분할에 자동 채택 정답을 사용할 정책은
+4단계에서 별도로 정해야 합니다. 현재 단계에는 릴리스 명령이 없습니다.
 
 editable 설치 상태에서는 코드 수정이 반영되지만, 실행 중인 검수 서버에는 모듈이 이미 로드되어
 있으므로 서버를 다시 시작해야 합니다.
@@ -249,6 +331,8 @@ editable 설치 상태에서는 코드 수정이 반영되지만, 실행 중인 
 ├── fiftyone/db/             # 영속 검수 DB
 ├── fiftyone/plugins/        # review 실행 시 설치하는 프로젝트 검수 operator
 ├── reviews/<image-id>/      # 승인·재검수·제외 기록과 승인한 정답 스냅샷
+├── reviews/records.sqlite3  # 자동 채택 기록을 모은 DB (WAL 포함)
+├── reviews/audit-cursor.json # 증분 검사 조회 위치
 └── runs/<job-id>/
     ├── config.json          # 절대 경로를 포함한 최종 설정
     ├── dependencies.json    # 실제 설치된 의존성 버전
@@ -288,8 +372,19 @@ ruff format --check src tests
 동시 수정 충돌과 operator 등록을 확인합니다.
 
 ```shell
-VLOOP_TEST_FIFTYONE=1 python -m pytest tests/test_fiftyone_integration.py tests/test_review_integration.py -q
+VLOOP_TEST_FIFTYONE=1 python -m pytest tests/test_fiftyone_integration.py tests/test_review_integration.py tests/test_review_batch_integration.py -q
 ```
+
+100만 건의 합성 메타데이터를 SQLite 작업 목록으로 만드는 메모리 검증:
+
+```shell
+python tests/review_scale_runner.py --count 1000000
+```
+
+로컬 측정은 약 4초, 프로세스 최대 RSS 44.7 MiB, 작업 중 RSS 증가 2.5 MiB였습니다.
+실제 이미지 100만 장의 추론·MongoDB·마스크 처리 성능을 측정한 결과는 아닙니다.
+실제 처리 시간과 디스크 사용량은 이미지·객체 수와 저장 장치에 따라 달라집니다. 기존 ingest와
+autolabel의 전체 해시 검사·이미지별 파일 저장 등은 별도의 대규모 검증이 필요합니다.
 
 실제 SAM 3 GPU 검증은 체크포인트와 소스가 설정된 YAML 경로를 지정합니다. 프로젝트의 실제
 이미지·클래스 대신 공식 샘플 2장과 별도 임시 DB를 사용합니다. 한 장 처리 후 중단하고 새
@@ -314,6 +409,9 @@ src/vloop/
 ├── sam3.py         # FiftyOne SAM 3 adapter, 한 장 추론 확인
 ├── labels.py       # 박스·마스크 좌표 변환과 COCO RLE
 ├── review.py       # 검수 준비·상태 변경·승인 후 변경 감지
+├── review_batch.py # 대량 채택 미리보기·선별·중단 및 재개
+├── review_store.py # 자동 채택 기록 SQLite 저장
+├── review_audit.py # 중단·재개 가능한 전체 무결성 검사
 ├── approval.py     # 정답 스냅샷·해시와 승인 일치 검사
 ├── review_operators.py # FiftyOne 검수 operator
 ├── review_plugin/  # 프로젝트에 설치할 플러그인 등록 파일

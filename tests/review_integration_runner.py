@@ -77,7 +77,7 @@ def run(config_path):
     existing.save()
     report = prepare_review(cfg)
     assert report["status"] == "completed", report
-    assert (report["initialized"], report["unavailable"]) == (2, 1), report
+    assert (report["initialized"], report["unavailable"]) == (2, 0), report
     dataset.reload()
     first, empty, missing, existing = [dataset[sample_id] for sample_id in ids]
     assert existing["review_initialized"]
@@ -90,7 +90,7 @@ def run(config_path):
     assert missing["ground_truth"] is None
     assert set(dataset.active_label_schemas) >= {"ground_truth", "review_status"}
     assert dataset.label_schemas[field]["read_only"]
-    assert len(dataset.list_saved_views()) == 4
+    assert len(dataset.list_saved_views()) == 8
 
     first["ground_truth"].detections[0].label = "other-object"
     first.save()
@@ -133,7 +133,7 @@ def run(config_path):
     assert missing["ground_truth"].detections == []
     assert missing["review_approved_hash"] is None
     again = prepare_review(cfg, job_id=job_id)
-    assert again["initialized"] == 0 and again["preserved"] == 4, again
+    assert again["initialized"] == 0, again
     existing.reload()
     assert existing["ground_truth"] is None
     first.reload()

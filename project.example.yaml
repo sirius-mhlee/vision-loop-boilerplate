@@ -23,6 +23,11 @@ sam3_precision: bfloat16
 
 # Local services
 fiftyone_port: 5151
+# Review: bounded startup preparation and incremental background checks
+review_prepare_limit: 100
+review_audit_batch_size: 100
+review_audit_scan_size: 10000
+review_poll_seconds: 5
 mlflow_port: 5000
 dvc_remote: ../vision-loop-dvc-remote
 
