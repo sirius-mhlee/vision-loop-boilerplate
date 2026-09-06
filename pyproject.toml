@@ -11,9 +11,14 @@ requires-python = ">=3.12,<3.13"
 dependencies = ["PyYAML>=6,<7", "Pillow>=12.2,<13"]
 
 [project.optional-dependencies]
-vision = ["fiftyone==1.21.0"]
+# SAM 3 itself is installed separately from the pinned local checkout.
+autolabel = [
+    "fiftyone==1.21.0", "numpy==1.26.4", "opencv-python-headless==4.11.0.86",
+    "scipy==1.16.3", "tifffile==2025.5.10", "einops==0.8.2", "pycocotools==2.0.11",
+    "setuptools>=77,<81",
+]
 pipeline = ["fiftyone==1.21.0", "rfdetr[train]==1.8.2", "mlflow==3.16.0", "dvc>=3,<4"]
-dev = ["pytest>=9,<10", "ruff>=0.16,<0.17"]
+dev = ["pytest>=9,<10", "ruff>=0.16,<0.17", "numpy>=1.26,<2", "pycocotools==2.0.11"]
 
 [project.scripts]
 vloop = "vloop.cli:main"

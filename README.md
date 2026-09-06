@@ -5,8 +5,8 @@ A boilerplate for an iterative computer vision pipeline covering auto-labeling, 
 로컬 이미지의 자동 라벨링 → 검수 → 데이터 버전 저장 → 학습 → 평가를 반복하는 프로젝트입니다.
 원본 [구현 계획](docs/PLAN.md)과 현재 [진행 상태](docs/PROGRESS.md)를 함께 관리합니다.
 
-현재 실행 가능한 명령은 `doctor`, `ingest`입니다. SAM 3 한 장 추론 확인 경로도 포함했으며,
-실제 체크포인트를 사용한 검증은 아직 필요합니다. 자동 라벨링 작업·재개, 검수 operator,
+현재 실행 가능한 명령은 `doctor`, `ingest`, `autolabel`입니다. RTX 5060 Laptop 8 GB에서
+실제 SAM 3 추론과 중단 후 다른 프로세스의 재개를 검증했습니다. 검수 operator,
 DVC 릴리스, RF-DETR 학습, MLflow 평가 명령은 후속 단계입니다.
 
 ## Requirement
@@ -18,11 +18,16 @@ DVC 릴리스, RF-DETR 학습, MLflow 평가 명령은 후속 단계입니다.
 ```shell
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[dev,vision]'
 python -m pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -e '.[dev,autolabel]'
 ```
 
-RF-DETR·MLflow·DVC는 해당 단계 작업 시 설치합니다.
+`autolabel` extra는 FiftyOne과 SAM 3 실행에 필요한 주변 라이브러리를 설치합니다.
+SAM 3 패키지 자체와 체크포인트는 포함하지 않으므로 아래 소스 설치 절차도 필요합니다.
+검증한 NumPy 1.26.4, OpenCV 4.11.0.86 등의 버전을 지정했습니다.
+
+`pipeline` extra는 FiftyOne·RF-DETR·MLflow·DVC를 설치하며, 해당 단계 작업 시 추가합니다.
+FiftyOne은 두 extra에 같은 버전으로 선언되어 있어 함께 선택해도 중복 설치되지 않습니다.
 
 ```shell
 python -m pip install -e '.[pipeline]'
@@ -77,19 +82,46 @@ git -C .vloop/vendor/sam3 rev-parse HEAD
 python -m pip install -e .vloop/vendor/sam3
 ```
 
+소스를 준비한 뒤 프로젝트와 SAM 3를 한 명령으로 설치할 수도 있습니다.
+이미 같은 가상환경에 해당 SAM 3 소스를 설치했다면 반복할 필요는 없습니다.
+
+```shell
+python -m pip install -e '.[dev,autolabel]' -e .vloop/vendor/sam3
+```
+
 출력된 전체 커밋을 `sam3_commit`, 체크아웃 경로를 `sam3_source_dir`, 내려받은 가중치 경로를
-`sam3_checkpoint`에 입력합니다. 이 시점의 커밋은 후보이며 한 장 추론과 통합 검증 후 고정합니다.
-위 SAM 3 설치는 PyTorch 설치 후 수행합니다. 의존성 충돌이 보고되면 먼저 해결합니다.
+실제 `project.yaml`의 `sam3_checkpoint`에 입력합니다. `project.example.yaml`만 수정해도
+기존 `project.yaml`에는 자동 반영되지 않습니다. 위 SAM 3 설치는 PyTorch 설치 후 수행합니다.
+
+이번에 검증한 SAM 3 커밋은 `660a5e9e1b8b4c02c0ad97229b88a09a6e4ff5b7`입니다.
+다른 환경에서 같은 구성을 준비하려면 SAM 3 저장소를 이 커밋으로 체크아웃한 뒤 설치합니다.
+
+```yaml
+sam3_checkpoint: .vloop/models/sam3/sam3.pt
+sam3_source_dir: .vloop/vendor/sam3
+sam3_commit: 660a5e9e1b8b4c02c0ad97229b88a09a6e4ff5b7
+sam3_precision: bfloat16
+```
+
+```shell
+python -m pip check
+```
 
 ```shell
 vloop doctor --sam3-image /absolute/path/image.jpg
 ```
 
 [FiftyOne 공식 SAM 3 모델](https://docs.voxel51.com/model_zoo/models/segment_anything_3_image_torch.html)의
-concept 모드에 클래스별 프롬프트를 전달합니다. 임시 FiftyOne 데이터셋에서 배치 1로 실행하며,
+concept 모드에 클래스별 프롬프트를 전달합니다. 공식 모델 wrapper의 단일 이미지 추론으로
 정규화된 이미지·픽셀 좌표 박스·클래스 ID·인스턴스 마스크 PNG를 실행 폴더에 저장합니다.
-마스크 PNG의 좌표계는 해당 박스 내부입니다. 이 결과는 자동 예측이며 검수 승인이 아닙니다.
+마스크 PNG와 JSON의 COCO RLE는 모두 정규화된 이미지 전체 좌표계를 사용합니다.
+모델은 로컬 체크포인트와 어휘 파일을 읽고, 이미지 1장·프롬프트 1개씩 BF16으로 추론합니다.
+컴파일과 원격 가중치 자동 다운로드는 사용하지 않습니다. 이 결과는 자동 예측이며 검수 승인이 아닙니다.
 이 명령은 자동 라벨링 작업의 중단·재개 기능을 제공하지 않습니다.
+
+공식 `truck.jpg`(1800×1200)에서 트럭 1개를 검출했고, PyTorch 최대 할당 메모리는
+5.26 GiB, 최대 예약 메모리는 5.51 GiB였습니다. 이는 샘플 이미지의 측정값이며 해상도·객체 수와
+다른 GPU 프로그램의 사용량에 따라 달라집니다. CUDA 추론만 검증했으며 CPU 경로는 미검증입니다.
 
 ## Ingest
 
@@ -116,6 +148,34 @@ vloop ingest --local-only
 `--local-only` 결과에는 `FiftyOne sync: not_requested`가 표시됩니다.
 이후 `vloop ingest`를 실행하면 등록된 목록을 FiftyOne에 동기화합니다.
 
+## Autolabel
+
+실제 이미지 폴더와 클래스 프롬프트를 입력한 뒤 작은 묶음부터 실행합니다.
+
+```shell
+vloop ingest
+vloop autolabel --limit 3
+vloop autolabel --resume <JOB_ID>
+```
+
+`--limit`는 새 작업의 입력을 이미지 ID 순으로 제한합니다. 생략하면 현재 등록된 전체 이미지를
+대상으로 합니다. 재개할 때는 추가 이미지나 현재 YAML의 바뀐 프롬프트를 반영하지 않습니다.
+새 이미지·설정으로 실험하려면 `--resume` 없이 새 작업을 시작합니다.
+
+- 시작 시 입력 목록, 설정, 임계값, SAM 3 커밋·가중치 해시·adapter 해시·의존성을 고정합니다.
+- 예측은 FiftyOne의 `pred_autolabel_<작업 ID의 날짜·접미사>` 필드와 이미지별 JSON에 저장합니다.
+  `ground_truth`와 검수 상태를 자동으로 변경하지 않습니다.
+- 완료된 이미지는 추론을 건너뜁니다. 추론 결과 저장 후 DB 반영만 실패했다면 저장된 결과를
+  재사용합니다. 입력·결과 변조나 모델 환경 변경이 확인되면 해당 결과를 덮어쓰지 않고 오류를 냅니다.
+- 객체가 없는 정상 결과는 빈 `Detections`로 저장합니다. 실패·미완료와 별도로 집계합니다.
+- 이미지별 오류는 기록하고 나머지 처리를 계속합니다. GPU 메모리 부족이나 모델 로딩 실패는
+  작업을 멈추고 재개할 ID를 남깁니다. 실행 전 입력 스냅샷 생성에 실패하면 새 작업으로 시작합니다.
+- 같은 클래스에 프롬프트를 여러 개 지정하면 중복 객체가 나올 수 있습니다. 프롬프트별 결과를
+  보존하며, 중복 정리는 후속 검수에서 수행합니다.
+
+FiftyOne에는 박스 내부 마스크를 저장하고, JSON에는 이미지 전체 크기의 COCO RLE를 저장합니다.
+변환 시 박스 위치·마스크 크기·면적을 검사하며 구멍이나 분리 영역을 단순 다각형으로 바꾸지 않습니다.
+
 ## Results / Recovery
 
 ```text
@@ -127,7 +187,12 @@ vloop ingest --local-only
     ├── config.json          # 절대 경로를 포함한 최종 설정
     ├── dependencies.json    # 실제 설치된 의존성 버전
     ├── report.json          # 상태, 코드 커밋, 건수, 결과 위치
-    └── files.jsonl          # ingest 파일별 결과
+    ├── files.jsonl          # ingest 파일별 결과
+    ├── manifest.json       # autolabel 설정·모델·입력 해시
+    ├── samples.sqlite3     # 고정 입력과 이미지별 처리 상태
+    ├── predictions/        # 이미지별 박스·클래스·전체 마스크 RLE
+    ├── errors/             # 이미지별 실패 원인
+    └── attempts/           # 재개 이전 보고서
 ```
 
 - 성공 `0`, 처리·검사 실패 `1`, 설정·호출 오류 `2`, 사용자 중단 `130`의 종료 코드를 사용합니다.
@@ -135,8 +200,8 @@ vloop ingest --local-only
 - FiftyOne 연결에 실패해도 등록 목록은 남습니다. 원인을 해결하고 같은 명령을 실행합니다.
 - 원본이 있고 관리 이미지가 사라진 경우 재등록으로 복구합니다. 관리 파일이 변경된 경우는 오류로
   보고하므로 해당 원인을 확인해야 합니다.
-- 강제 종료로 `running` 보고서가 남을 수 있습니다. 재실행은 새 작업 ID를 만들고 이미 등록된
-  이미지부터 확인합니다. 이는 앞으로 구현할 `autolabel --resume JOB_ID`와 별개입니다.
+- 강제 종료로 `running` 보고서가 남을 수 있습니다. 등록은 `vloop ingest`를 다시 실행하고,
+  자동 라벨링은 `vloop autolabel --resume JOB_ID`로 원래 작업을 이어갑니다.
 - 한 프로젝트에서 실행을 겹치면 잠금 오류를 반환합니다.
 
 FiftyOne DB와 모델 저장소는 프로젝트의 `storage_dir` 아래에 둡니다. 앱 연결 주소는
@@ -159,6 +224,14 @@ ruff format --check src tests
 VLOOP_TEST_FIFTYONE=1 python -m pytest tests/test_fiftyone_integration.py -q
 ```
 
+실제 SAM 3 GPU 검증은 체크포인트와 소스가 설정된 YAML 경로를 지정합니다. 프로젝트의 실제
+이미지·클래스 대신 공식 샘플 2장과 별도 임시 DB를 사용합니다. 한 장 처리 후 중단하고 새
+프로세스에서 재개하며, 설정 변경과 사람의 수정 내용 보존도 확인합니다.
+
+```shell
+VLOOP_TEST_SAM3_CONFIG=/absolute/path/project.yaml python -m pytest tests/test_sam3_integration.py -q -s
+```
+
 ## Structure
 
 ```text
@@ -170,7 +243,9 @@ src/vloop/
 ├── doctor.py       # 환경 검사
 ├── ingest.py       # 이미지 등록
 ├── fiftyone.py     # DB 설정과 등록 목록 동기화
-├── sam3.py         # 한 장 추론 확인
+├── autolabel.py    # 작업 스냅샷, 이미지별 상태, 재개
+├── sam3.py         # FiftyOne SAM 3 adapter, 한 장 추론 확인
+├── labels.py       # 박스·마스크 좌표 변환과 COCO RLE
 └── runtime.py      # 해시, 실행 기록, 잠금
 tests/
 docs/

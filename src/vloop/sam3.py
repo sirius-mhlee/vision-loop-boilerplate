@@ -1,90 +1,176 @@
+import gc
+from contextlib import nullcontext
+from importlib.metadata import version
 from pathlib import Path
+from time import perf_counter
+
+from PIL import Image
 
 from .config import Config
 from .fiftyone import configure_fiftyone
 from .ingest import normalize_image
-from .runtime import write_json
+from .runtime import sha256_file, write_json
+
+
+def model_identity(cfg: Config) -> dict:
+    from .doctor import check_checkpoint, check_sam3_source
+
+    check_sam3_source(cfg)
+    check_checkpoint(cfg)
+    vocabulary = cfg.sam3_source_dir / "sam3/assets/bpe_simple_vocab_16e6.txt.gz"
+    return {
+        "model": cfg.sam3_model,
+        "sam3_commit": cfg.sam3_commit,
+        "checkpoint_sha256": sha256_file(cfg.sam3_checkpoint),
+        "vocabulary_sha256": sha256_file(vocabulary),
+        "precision": cfg.sam3_precision,
+        "prompt_batch_size": 1,
+        "image_batch_size": 1,
+        "dependencies": {
+            name: version(name)
+            for name in ("torch", "torchvision", "fiftyone", "sam3", "numpy", "pycocotools")
+        },
+        "adapter_sha256": sha256_file(Path(__file__)),
+        "labels_sha256": sha256_file(Path(__file__).with_name("labels.py")),
+    }
+
+
+class Sam3Labeler:
+    """The pinned FiftyOne model, with one image and one concept per forward pass."""
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.model = None
+        self.metrics = {}
+
+    def __enter__(self):
+        import torch
+
+        self.torch = torch
+        self.device = torch.device(self.cfg.device)
+        if self.device.type == "cuda":
+            torch.cuda.set_device(self.device)
+            torch.cuda.init()
+            if self.cfg.sam3_precision == "bfloat16" and not torch.cuda.is_bf16_supported():
+                raise ValueError("This CUDA device does not support bfloat16")
+            torch.cuda.reset_peak_memory_stats(self.device)
+        elif self.cfg.sam3_precision != "float32":
+            raise ValueError("CPU inference requires sam3_precision: float32")
+        configure_fiftyone(self.cfg)
+        import fiftyone.zoo as foz
+
+        self.started = perf_counter()
+        try:
+            self.model = foz.load_zoo_model(
+                self.cfg.sam3_model,
+                operation_mode="concept",
+                classes=[],
+                cache=False,
+                confidence_thresh=self.cfg.autolabel_confidence,
+                device=str(self.device),
+                entrypoint_args={
+                    "checkpoint_path": str(self.cfg.sam3_checkpoint),
+                    "bpe_path": str(
+                        self.cfg.sam3_source_dir / "sam3/assets/bpe_simple_vocab_16e6.txt.gz"
+                    ),
+                    "load_from_HF": False,
+                    "compile": False,
+                },
+            )
+            # FiftyOne 1.21 otherwise filters scores at 0.5 before the configured threshold.
+            self.model._concept_output_processor.mask_thresh = self.cfg.autolabel_confidence
+            self.model.__enter__()
+        except BaseException:
+            self.model = None
+            gc.collect()
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            raise
+        return self
+
+    def predict(self, image: dict) -> dict:
+        from .labels import from_detection
+
+        torch = self.torch
+        predictions = []
+        started = perf_counter()
+        for prompt, item in self.cfg.prompt_to_class.items():
+            self.model.config.classes = [prompt]
+            get_item = self.model.build_get_item()
+            inputs = get_item({"id": image["image_id"], "filepath": image["filepath"]})
+            autocast = (
+                torch.autocast("cuda", dtype=torch.bfloat16)
+                if self.device.type == "cuda" and self.cfg.sam3_precision == "bfloat16"
+                else nullcontext()
+            )
+            with torch.inference_mode(), autocast:
+                output = self.model.predict(inputs)
+            if output is None:
+                raise RuntimeError("SAM 3 returned no prediction; empty Detections is required")
+            for detection in output.detections:
+                if detection.label != prompt:
+                    raise ValueError(f"Unexpected SAM 3 label: {detection.label}")
+                predictions.append(
+                    from_detection(detection, item, prompt, image["width"], image["height"])
+                )
+            del output, inputs
+        self._update_metrics()
+        return {
+            "image_id": image["image_id"],
+            "width": image["width"],
+            "height": image["height"],
+            "instances": predictions,
+            "elapsed_seconds": perf_counter() - started,
+        }
+
+    def _update_metrics(self):
+        self.metrics["elapsed_seconds"] = perf_counter() - self.started
+        if self.device.type == "cuda":
+            self.torch.cuda.synchronize(self.device)
+            self.metrics.update(
+                peak_allocated_gib=self.torch.cuda.max_memory_allocated(self.device) / 1024**3,
+                peak_reserved_gib=self.torch.cuda.max_memory_reserved(self.device) / 1024**3,
+            )
+
+    def __exit__(self, *args):
+        try:
+            self._update_metrics()
+        finally:
+            if self.model is not None:
+                self.model.__exit__(*args)
+            self.model = None
+            gc.collect()
+            if self.device.type == "cuda":
+                self.torch.cuda.empty_cache()
 
 
 def smoke_predict(cfg: Config, source: Path, result_dir: Path) -> str:
-    """Check the official concept-mode adapter without modifying a review dataset."""
-    from .doctor import check_checkpoint, check_sam3_source
+    from .labels import decode_mask
 
-    errors = cfg.input_errors()
-    if errors:
-        raise ValueError("; ".join(errors))
-    check_checkpoint(cfg)
-    check_sam3_source(cfg)
-    fo = configure_fiftyone(cfg)
-    import fiftyone.zoo as foz
-    import numpy as np
-    from PIL import Image
-
+    if not cfg.classes:
+        raise ValueError("Set classes and prompts before running SAM 3")
+    identity = model_identity(cfg)
+    write_json(result_dir / "sam3-model.json", identity)
     source = source.expanduser().resolve()
     normalized = result_dir / "sam3-input.png"
     width, height = normalize_image(source, normalized)
-    dataset = fo.Dataset()
+    image = {
+        "image_id": sha256_file(source),
+        "filepath": str(normalized),
+        "width": width,
+        "height": height,
+    }
+    labeler = Sam3Labeler(cfg)
     try:
-        dataset.add_sample(fo.Sample(filepath=str(normalized)))
-        model = foz.load_zoo_model(
-            cfg.sam3_model,
-            operation_mode="concept",
-            classes=list(cfg.prompt_to_class),
-            confidence_thresh=cfg.autolabel_confidence,
-            device=cfg.device,
-            entrypoint_args={"checkpoint_path": str(cfg.sam3_checkpoint)},
+        with labeler:
+            prediction = labeler.predict(image)
+        prediction.update(
+            source=str(source), image_path=str(normalized), review_status="unreviewed"
         )
-        dataset.apply_model(model, label_field="smoke_predictions", batch_size=1)
-        detections = dataset.first()["smoke_predictions"]
-        if detections is None:
-            raise RuntimeError(
-                "SAM 3 returned no prediction field; an empty Detections is required"
-            )
-        predictions = []
-        for index, detection in enumerate(detections.detections):
-            if detection.label not in cfg.prompt_to_class:
-                raise ValueError(f"Unknown model output class: {detection.label}")
-            item = cfg.prompt_to_class[detection.label]
-            box = np.asarray(detection.bounding_box, dtype=float)
-            if (
-                box.shape != (4,)
-                or not np.isfinite(box).all()
-                or (box < 0).any()
-                or (box[2:] <= 0).any()
-                or (box[:2] + box[2:] > 1.00001).any()
-            ):
-                raise ValueError("SAM 3 returned an invalid normalized bounding box")
-            mask = np.asarray(detection.mask)
-            if mask.ndim != 2 or not mask.size:
-                raise ValueError("SAM 3 returned a detection without a 2D instance mask")
-            mask_path = result_dir / f"mask-{index:04d}.png"
-            Image.fromarray((mask.astype(bool) * 255).astype("uint8")).save(mask_path)
-            x, y, w, h = box.tolist()
-            predictions.append(
-                {
-                    "class_id": item.id,
-                    "class_name": item.name,
-                    "prompt": detection.label,
-                    "confidence": detection.confidence,
-                    "bbox_xywh": [x * width, y * height, w * width, h * height],
-                    "mask_path": str(mask_path),
-                    "mask_space": "bounding_box",
-                }
-            )
-        write_json(
-            result_dir / "sam3-predictions.json",
-            {
-                "source": str(source),
-                "image_path": str(normalized),
-                "width": width,
-                "height": height,
-                "predictions": predictions,
-                "review_status": "unreviewed",
-            },
-        )
-        return (
-            f"Inference completed: {len(predictions)} objects; "
-            f"{result_dir / 'sam3-predictions.json'}"
-        )
+        write_json(result_dir / "sam3-predictions.json", prediction)
+        for index, item in enumerate(prediction["instances"]):
+            mask = decode_mask(item["segmentation"], width, height)
+            Image.fromarray(mask).save(result_dir / f"mask-{index:04d}.png")
+        return f"Inference completed: {len(prediction['instances'])} objects; {result_dir}"
     finally:
-        dataset.delete()
+        write_json(result_dir / "sam3-memory.json", labeler.metrics)

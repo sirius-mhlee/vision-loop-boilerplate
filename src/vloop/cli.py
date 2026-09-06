@@ -21,7 +21,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ingest.add_argument(
         "--local-only", action="store_true", help="Register locally without FiftyOne"
     )
-    for command in (doctor, ingest):
+    autolabel = commands.add_parser(
+        "autolabel", help="Run or resume sequential SAM 3 auto-labeling"
+    )
+    selection = autolabel.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--resume", metavar="JOB_ID", help="Resume with the job's frozen configuration"
+    )
+    selection.add_argument(
+        "--limit", type=int, help="Freeze only the first N registered images in a new job"
+    )
+    for command in (doctor, ingest, autolabel):
         command.add_argument("--config", default=argparse.SUPPRESS, help="Path to project YAML")
     return parser.parse_args(argv)
 
@@ -34,10 +44,14 @@ def main(argv: list[str] | None = None) -> int:
             from .doctor import doctor
 
             report = doctor(cfg, sam3_image=args.sam3_image)
-        else:
+        elif args.command == "ingest":
             from .ingest import ingest
 
             report = ingest(cfg, local_only=args.local_only)
+        else:
+            from .autolabel import autolabel
+
+            report = autolabel(cfg, resume=args.resume, limit=args.limit)
     except (OSError, ValueError, RuntimeError, yaml.YAMLError) as exc:
         print(f"vloop: {exc}", file=sys.stderr)
         return 2
@@ -49,12 +63,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[{check['status']}] {check['name']}: {check['detail']}")
         print(f"Checks: {report['passed']} passed, {report['failed']} failed")
         print(f"SAM 3 inference: {report.get('sam3_inference', 'not_run')}")
-    else:
+    elif args.command == "ingest":
         print(
             f"Images: {report['registered']} registered, {report['duplicate']} duplicates, "
             f"{report['repaired']} repaired, {report['failed']} failed"
         )
         print(f"FiftyOne sync: {report['sync_status']}")
+    else:
+        unfinished = sum(report.get(key, 0) for key in ("pending", "processing", "predicted"))
+        print(
+            f"Images: {report.get('completed', 0)} completed "
+            f"({report.get('empty', 0)} empty), {report.get('failed', 0)} failed, "
+            f"{unfinished} unfinished"
+        )
+        print(f"Prediction field: {report['prediction_field']}")
+        print(f"Processed this attempt: {report.get('processed_this_attempt', 0)}")
+        if report.get("config_source"):
+            print(f"Frozen config: {report['config_source']}")
     if report.get("error"):
         print(f"Error: {report['error']}", file=sys.stderr)
     if report["status"] != "completed" and "retry" in report:

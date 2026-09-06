@@ -14,11 +14,12 @@ seed: 42
 
 # Auto-labeling
 sam3_model: segment-anything-3-image-torch
-sam3_checkpoint: null
-sam3_source_dir: null
-sam3_commit: null
+sam3_checkpoint: .vloop/models/sam3/sam3.pt
+sam3_source_dir: .vloop/vendor/sam3
+sam3_commit: 660a5e9e1b8b4c02c0ad97229b88a09a6e4ff5b7
 autolabel_batch_size: 1
 autolabel_confidence: 0.5
+sam3_precision: bfloat16
 
 # Local services
 fiftyone_port: 5151

@@ -1,7 +1,9 @@
 import json
+import re
 import subprocess
 import sys
 import tempfile
+import traceback
 from importlib.metadata import PackageNotFoundError, distribution, version
 from pathlib import Path
 
@@ -116,6 +118,10 @@ def doctor(cfg: Config, *, sam3_image: Path | None = None) -> dict:
                 detail = function()
                 checks.append({"name": name, "status": "passed", "detail": str(detail)})
             except Exception as exc:
+                error_name = re.sub(r"[^a-zA-Z0-9_-]", "-", name)
+                (directory / f"{error_name}-error.txt").write_text(
+                    traceback.format_exc(), encoding="utf-8"
+                )
                 checks.append(
                     {"name": name, "status": "failed", "detail": f"{type(exc).__name__}: {exc}"}
                 )

@@ -29,6 +29,7 @@ class Config:
     sam3_commit: str | None = None
     autolabel_batch_size: int = 1
     autolabel_confidence: float = 0.5
+    sam3_precision: str = "bfloat16"
 
     fiftyone_port: int = 5151
     mlflow_port: int = 5000
@@ -131,8 +132,14 @@ def load_config(path: str | Path | None = None) -> Config:
     config_path = find_config(path)
     with config_path.open(encoding="utf-8") as handle:
         data = yaml.safe_load(handle)
+    return config_from_dict(data, config_path)
+
+
+def config_from_dict(data: dict, config_path: Path) -> Config:
+    """Validate both user YAML and frozen job configurations through the same path."""
     if not isinstance(data, dict):
         raise ValueError("Config must be a YAML mapping")
+    data = dict(data)
     allowed = {item.name for item in fields(Config)} - {"config_path"}
     unknown = set(data) - allowed
     if unknown:
@@ -182,6 +189,8 @@ def load_config(path: str | Path | None = None) -> Config:
         raise ValueError("split_ratios must contain three positive numbers summing to 1")
     data["split_ratios"] = tuple(ratios)
     cfg = Config(**data, config_path=config_path)
+    if cfg.sam3_precision not in ("bfloat16", "float32"):
+        raise ValueError("sam3_precision must be bfloat16 or float32")
     if cfg.eval_split not in ("val", "test"):
         raise ValueError("eval_split must be val or test")
     if cfg.sam3_model != defaults.sam3_model or cfg.train_model != defaults.train_model:
