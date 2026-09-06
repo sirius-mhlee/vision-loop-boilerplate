@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vision-loop-boilerplate"
+version = "0.1.0"
+description = "An iterative computer vision pipeline for local images"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = ["PyYAML>=6,<7", "Pillow>=12.2,<13"]
+
+[project.optional-dependencies]
+vision = ["fiftyone==1.21.0"]
+pipeline = ["fiftyone==1.21.0", "rfdetr[train]==1.8.2", "mlflow==3.16.0", "dvc>=3,<4"]
+dev = ["pytest>=9,<10", "ruff>=0.16,<0.17"]
+
+[project.scripts]
+vloop = "vloop.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

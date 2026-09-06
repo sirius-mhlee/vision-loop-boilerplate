@@ -1,0 +1,40 @@
+# Required: copy to project.yaml and enter your own dataset and classes.
+image_dir: null
+classes: []
+# classes:
+#   - id: <project class ID>
+#     name: <class name>
+#     prompts: [<SAM 3 text prompt>]
+
+# Common (relative paths are resolved from this YAML file)
+dataset_name: vision-loop
+storage_dir: .vloop
+device: cuda:0
+seed: 42
+
+# Auto-labeling
+sam3_model: segment-anything-3-image-torch
+sam3_checkpoint: null
+sam3_source_dir: null
+sam3_commit: null
+autolabel_batch_size: 1
+autolabel_confidence: 0.5
+
+# Local services
+fiftyone_port: 5151
+mlflow_port: 5000
+dvc_remote: ../vision-loop-dvc-remote
+
+# Training
+train_model: RFDETRSegNano
+epochs: 30
+batch_size: 1
+grad_accum_steps: 8
+learning_rate: 0.0001
+
+# Release / Evaluation
+split_ratios: [0.8, 0.1, 0.1]
+eval_split: val
+eval_confidence: 0.001
+display_confidence: 0.5
+eval_max_detections: 100
