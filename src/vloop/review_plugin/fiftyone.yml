@@ -1,0 +1,10 @@
+name: "@vloop/review"
+type: plugin
+version: 0.1.0
+description: "VLoop 검수 시작, 완료, 재검수 및 제외"
+fiftyone:
+  version: "==1.21.0"
+operators:
+  - review_start
+  - review_complete
+  - review_exclude

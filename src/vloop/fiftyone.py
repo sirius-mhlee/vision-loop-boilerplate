@@ -24,12 +24,14 @@ def configure_fiftyone(cfg: Config):
     os.environ["FIFTYONE_DEFAULT_APP_ADDRESS"] = "127.0.0.1"
     os.environ["FIFTYONE_DEFAULT_APP_PORT"] = str(cfg.fiftyone_port)
     os.environ["FIFTYONE_MODEL_ZOO_DIR"] = str(cfg.storage_dir / "models")
+    os.environ["FIFTYONE_PLUGINS_DIR"] = str(cfg.storage_dir / "fiftyone/plugins")
     import fiftyone as fo
 
     fo.config.database_dir = str(database_dir)
     fo.config.default_app_address = "127.0.0.1"
     fo.config.default_app_port = cfg.fiftyone_port
     fo.config.model_zoo_dir = str(cfg.storage_dir / "models")
+    fo.config.plugins_dir = str(cfg.storage_dir / "fiftyone/plugins")
     return fo
 
 

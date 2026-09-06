@@ -11,7 +11,6 @@ requires-python = ">=3.12,<3.13"
 dependencies = ["PyYAML>=6,<7", "Pillow>=12.2,<13"]
 
 [project.optional-dependencies]
-# SAM 3 itself is installed separately from the pinned local checkout.
 autolabel = [
     "fiftyone==1.21.0", "numpy==1.26.4", "opencv-python-headless==4.11.0.86",
     "scipy==1.16.3", "tifffile==2025.5.10", "einops==0.8.2", "pycocotools==2.0.11",
@@ -25,6 +24,9 @@ vloop = "vloop.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"vloop.review_plugin" = ["fiftyone.yml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

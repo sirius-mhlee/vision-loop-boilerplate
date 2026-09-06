@@ -3,6 +3,7 @@
 import math
 
 import numpy as np
+from PIL import Image
 from pycocotools import mask as coco_mask
 
 
@@ -34,6 +35,34 @@ def pixel_box(box, width: int, height: int) -> tuple[int, int, int, int]:
     if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
         raise ValueError("Bounding box lies outside the registered image")
     return x1, y1, x2 - x1, y2 - y1
+
+
+def project_review_mask(box, crop: np.ndarray, width: int, height: int):
+    """Project the native editor's viewport-sized mask onto registered image pixels."""
+    values = np.asarray(box, dtype=float)
+    if values.shape != (4,) or not np.isfinite(values).all():
+        raise ValueError("Ground truth box must contain four finite numbers")
+    x, y, w, h = values.tolist()
+    if not (0 <= x < x + w <= 1 + 1e-9 and 0 <= y < y + h <= 1 + 1e-9):
+        raise ValueError("Ground truth box lies outside the registered image")
+    if crop.ndim != 2 or not np.isin(crop, [0, 1]).all() or not crop.any():
+        raise ValueError("Instance mask must be non-empty and binary")
+    edges = np.rint(np.array([x, y, x + w, y + h]) * [width, height, width, height]).astype(int)
+    x1, y1, x2, y2 = np.clip(edges, 0, [width, height, width, height]).tolist()
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError("Instance occupies less than one registered image pixel")
+    rendered = crop.astype(bool)
+    if rendered.shape != (y2 - y1, x2 - x1):
+        rendered = np.asarray(
+            Image.fromarray(crop.astype(np.uint8)).resize(
+                (x2 - x1, y2 - y1), Image.Resampling.NEAREST
+            )
+        ).astype(bool)
+    if not rendered.any():
+        raise ValueError("Instance disappears at registered image resolution")
+    mask = np.zeros((height, width), dtype=bool)
+    mask[y1:y2, x1:x2] = rendered
+    return [x1, y1, x2 - x1, y2 - y1], mask
 
 
 def from_detection(detection, class_config, prompt: str, width: int, height: int) -> dict:

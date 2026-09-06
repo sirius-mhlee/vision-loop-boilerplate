@@ -31,7 +31,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     selection.add_argument(
         "--limit", type=int, help="Freeze only the first N registered images in a new job"
     )
-    for command in (doctor, ingest, autolabel):
+    review = commands.add_parser(
+        "review", help="Prepare ground truth and open the FiftyOne review App"
+    )
+    review.add_argument(
+        "--job-id", help="Prediction job to initialize missing ground truth (default: latest)"
+    )
+    review.add_argument(
+        "--prepare-only", action="store_true", help="Prepare the dataset without starting the App"
+    )
+    review.add_argument(
+        "--no-browser", action="store_true", help="Serve the App without opening a browser"
+    )
+    for command in (doctor, ingest, autolabel, review):
         command.add_argument("--config", default=argparse.SUPPRESS, help="Path to project YAML")
     return parser.parse_args(argv)
 
@@ -48,10 +60,14 @@ def main(argv: list[str] | None = None) -> int:
             from .ingest import ingest
 
             report = ingest(cfg, local_only=args.local_only)
-        else:
+        elif args.command == "autolabel":
             from .autolabel import autolabel
 
             report = autolabel(cfg, resume=args.resume, limit=args.limit)
+        else:
+            from .review import prepare_review
+
+            report = prepare_review(cfg, job_id=args.job_id)
     except (OSError, ValueError, RuntimeError, yaml.YAMLError) as exc:
         print(f"vloop: {exc}", file=sys.stderr)
         return 2
@@ -69,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{report['repaired']} repaired, {report['failed']} failed"
         )
         print(f"FiftyOne sync: {report['sync_status']}")
-    else:
+    elif args.command == "autolabel":
         unfinished = sum(report.get(key, 0) for key in ("pending", "processing", "predicted"))
         print(
             f"Images: {report.get('completed', 0)} completed "
@@ -80,9 +96,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Processed this attempt: {report.get('processed_this_attempt', 0)}")
         if report.get("config_source"):
             print(f"Frozen config: {report['config_source']}")
+    else:
+        print(f"Source job: {report.get('source_job_id') or 'manual review'}")
+        print(
+            f"Ground truth: {report['initialized']} initialized, {report['preserved']} preserved, "
+            f"{report['unavailable']} without a prediction"
+        )
+        print(f"Approvals invalidated: {report.get('invalidated', 0)}")
     if report.get("error"):
         print(f"Error: {report['error']}", file=sys.stderr)
     if report["status"] != "completed" and "retry" in report:
         print(f"Retry: {report['retry']}")
     print(f"Results: {report['result_dir']}")
+    if args.command == "review" and report["status"] == "completed" and not args.prepare_only:
+        from .review import serve_review
+
+        try:
+            serve_review(cfg, no_browser=args.no_browser)
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"vloop review: {exc}", file=sys.stderr)
+            return 1
     return 0 if report["status"] == "completed" else 130 if report["status"] == "interrupted" else 1
