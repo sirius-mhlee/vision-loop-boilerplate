@@ -46,6 +46,7 @@ class Config:
     learning_rate: float = 1e-4
 
     split_ratios: tuple[float, ...] = (0.8, 0.1, 0.1)
+    release_group_field: str | None = None
     eval_split: str = "val"
     eval_confidence: float = 0.001
     display_confidence: float = 0.5
@@ -197,6 +198,11 @@ def config_from_dict(data: dict, config_path: Path) -> Config:
         raise ValueError("split_ratios must contain three positive numbers summing to 1")
     data["split_ratios"] = tuple(ratios)
     cfg = Config(**data, config_path=config_path)
+    if cfg.release_group_field is not None and (
+        not isinstance(cfg.release_group_field, str)
+        or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", cfg.release_group_field)
+    ):
+        raise ValueError("release_group_field must be a top-level FiftyOne field name or null")
     if cfg.sam3_precision not in ("bfloat16", "float32"):
         raise ValueError("sam3_precision must be bfloat16 or float32")
     if cfg.eval_split not in ("val", "test"):

@@ -31,7 +31,14 @@ def save_record(connection, record):
     return digest
 
 
-def read_record(cfg, record_id):
+def read_record(cfg, record_id, *, connection=None):
+    if connection is not None:
+        row = connection.execute(
+            "SELECT content FROM records WHERE id = ?", (record_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("Approval record is missing")
+        return json.loads(row[0])
     try:
         with closing(connect_records(cfg, readonly=True)) as connection:
             row = connection.execute(

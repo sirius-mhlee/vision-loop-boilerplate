@@ -72,7 +72,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "review-audit", help="Run a resumable full approval integrity audit"
     )
     audit.add_argument("--resume", help="Continue a review_audit job")
-    for command in (doctor, ingest, autolabel, review, batch, audit):
+    release = commands.add_parser("release", help="Freeze approved COCO data and publish a DVC tag")
+    selection = release.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--version", help="New dataset version, e.g. v001")
+    selection.add_argument("--resume", help="Resume a release job")
+    release.add_argument(
+        "--include-auto-accepted",
+        action="store_true",
+        help="Explicitly include automatically accepted labels in train only",
+    )
+    release.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="Validate labels and estimate image storage without copying/uploading images",
+    )
+    restore = commands.add_parser("restore", help="Restore a tagged dataset into a separate cache")
+    restore.add_argument("--version", required=True, help="Dataset version, e.g. v001")
+    for command in (doctor, ingest, autolabel, review, batch, audit, release, restore):
         command.add_argument("--config", default=argparse.SUPPRESS, help="Path to project YAML")
     return parser.parse_args(argv)
 
@@ -111,10 +127,24 @@ def main(argv: list[str] | None = None) -> int:
                 apply=args.apply,
                 batch_size=args.batch_size,
             )
-        else:
+        elif args.command == "review-audit":
             from .review_audit import review_audit
 
             report = review_audit(cfg, resume=args.resume)
+        elif args.command == "release":
+            from .release import release
+
+            report = release(
+                cfg,
+                version=args.version,
+                resume=args.resume,
+                include_auto_train=args.include_auto_accepted,
+                prepare_only=args.prepare_only,
+            )
+        else:
+            from .release import restore
+
+            report = restore(cfg, version=args.version)
     except (OSError, ValueError, RuntimeError, yaml.YAMLError) as exc:
         print(f"vloop: {exc}", file=sys.stderr)
         return 2
@@ -155,8 +185,30 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Applied: {report.get('applied', 0)}, outcomes: {report.get('outcomes', {})}")
         if report["status"] == "ready":
             print(f"Preview only. Apply: vloop review-batch --resume {report['job_id']} --apply")
-    else:
+    elif args.command == "review-audit":
         print(f"Audited: {report.get('checked', 0)}, invalidated: {report.get('invalidated', 0)}")
+    else:
+        for split, counts in report.get("summary", {}).get("splits", {}).items():
+            print(
+                f"{split}: {counts['images']} images ({counts['empty']} empty), "
+                f"{counts['automatic']} automatic"
+            )
+        print(f"Held for group review: {report.get('summary', {}).get('held', 0)}")
+        if report.get("git_commit"):
+            print(f"Tag: dataset/{report['dataset_version']} ({report['git_commit']})")
+        if report.get("dataset_dir"):
+            print(f"Dataset directory: {report['dataset_dir']}")
+        if report.get("storage_plan"):
+            plan = report["storage_plan"]
+            print(
+                f"Images to store: {plan['new_images']} new, {plan['reused_images']} reusable, "
+                f"{plan['new_image_bytes'] / 2**30:.3f} GiB new image bytes"
+            )
+            print(
+                f"Local image-space estimate before link savings: "
+                f"{plan['image_bytes_upper_estimate_local'] / 2**30:.3f} GiB; "
+                f"free: {plan['local_free_bytes'] / 2**30:.3f} GiB (labels/metadata extra)"
+            )
     if report.get("error"):
         print(f"Error: {report['error']}", file=sys.stderr)
     if report["status"] != "completed" and "retry" in report:

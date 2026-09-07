@@ -74,6 +74,11 @@ def approved_annotation(
     cfg, sample, *, verify_image: bool = True, allow_auto: bool = False
 ) -> dict:
     """Fail closed: a status string alone never makes an annotation releasable."""
+    return approved_snapshot(cfg, sample, verify_image=verify_image, allow_auto=allow_auto)[0]
+
+
+def approved_snapshot(cfg, sample, *, verify_image=True, allow_auto=False, record_connection=None):
+    """Return the checked annotation and the exact approval record used to validate it."""
     automatic = sample["review_status"] == "auto_accepted"
     if sample["review_status"] != "completed" and not (automatic and allow_auto):
         raise ValueError("Image is not approved")
@@ -84,12 +89,13 @@ def approved_annotation(
     if automatic:
         from .review_store import read_record
 
-        record = read_record(cfg, sample["review_approval_id"])
+        record = read_record(cfg, sample["review_approval_id"], connection=record_connection)
         checksum = content_hash(record)
     else:
         path = record_path(cfg, sample, sample["review_approval_id"])
-        checksum = sha256_file(path)
-        record = json.loads(path.read_text())
+        raw = path.read_bytes()
+        checksum = hashlib.sha256(raw).hexdigest()
+        record = json.loads(raw)
     if checksum != sample["review_approval_sha256"]:
         raise ValueError("Approval record changed after approval")
     if (
@@ -101,4 +107,4 @@ def approved_annotation(
         raise ValueError("Approval record does not match the current annotation")
     if verify_image and sha256_file(Path(sample.filepath)) != content["managed_sha256"]:
         raise ValueError("Registered image content changed after approval")
-    return content
+    return content, record
