@@ -44,6 +44,9 @@ class Config:
     batch_size: int = 1
     grad_accum_steps: int = 8
     learning_rate: float = 1e-4
+    train_checkpoint: Path | None = None
+    train_num_workers: int = 0
+    train_gradient_checkpointing: bool = False
 
     split_ratios: tuple[float, ...] = (0.8, 0.1, 0.1)
     release_group_field: str | None = None
@@ -151,9 +154,21 @@ def config_from_dict(data: dict, config_path: Path) -> Config:
         raise ValueError(f"Unknown config keys: {', '.join(sorted(map(str, unknown)))}")
     data["classes"] = _classes(data.get("classes", []))
     defaults = Config()
-    for key in ("image_dir", "storage_dir", "dvc_remote", "sam3_checkpoint", "sam3_source_dir"):
+    for key in (
+        "image_dir",
+        "storage_dir",
+        "dvc_remote",
+        "sam3_checkpoint",
+        "sam3_source_dir",
+        "train_checkpoint",
+    ):
         value = data.get(key, getattr(defaults, key))
-        if value is None and key in ("image_dir", "sam3_checkpoint", "sam3_source_dir"):
+        if value is None and key in (
+            "image_dir",
+            "sam3_checkpoint",
+            "sam3_source_dir",
+            "train_checkpoint",
+        ):
             data[key] = None
         else:
             if not isinstance(value, (str, Path)) or not str(value).strip():
@@ -166,6 +181,7 @@ def config_from_dict(data: dict, config_path: Path) -> Config:
         "epochs",
         "batch_size",
         "grad_accum_steps",
+        "train_num_workers",
         "autolabel_batch_size",
         "fiftyone_port",
         "review_prepare_limit",
@@ -176,9 +192,10 @@ def config_from_dict(data: dict, config_path: Path) -> Config:
         "eval_max_detections",
     ):
         value = data.get(key, getattr(defaults, key))
-        if type(value) is not int or value < (0 if key == "seed" else 1):
+        minimum = 0 if key in ("seed", "train_num_workers") else 1
+        if type(value) is not int or value < minimum:
             raise ValueError(
-                f"{key} must be a {'non-negative' if key == 'seed' else 'positive'} integer"
+                f"{key} must be a {'non-negative' if minimum == 0 else 'positive'} integer"
             )
     for key in ("learning_rate", "autolabel_confidence", "eval_confidence", "display_confidence"):
         value = data.get(key, getattr(defaults, key))
@@ -198,6 +215,8 @@ def config_from_dict(data: dict, config_path: Path) -> Config:
         raise ValueError("split_ratios must contain three positive numbers summing to 1")
     data["split_ratios"] = tuple(ratios)
     cfg = Config(**data, config_path=config_path)
+    if type(cfg.train_gradient_checkpointing) is not bool:
+        raise ValueError("train_gradient_checkpointing must be a boolean")
     if cfg.release_group_field is not None and (
         not isinstance(cfg.release_group_field, str)
         or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", cfg.release_group_field)

@@ -37,6 +37,11 @@ epochs: 30
 batch_size: 1
 grad_accum_steps: 8
 learning_rate: 0.0001
+# null downloads official Seg Nano weights into storage_dir/models/rfdetr on first training.
+train_checkpoint: null
+# Keep COCO indices in one process initially; increase only after measuring RAM use.
+train_num_workers: 0
+train_gradient_checkpointing: false
 
 # Release / Evaluation
 split_ratios: [0.8, 0.1, 0.1]

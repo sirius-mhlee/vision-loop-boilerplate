@@ -6,10 +6,11 @@ A boilerplate for an iterative computer vision pipeline covering auto-labeling, 
 원본 [구현 계획](docs/PLAN.md)과 현재 [진행 상태](docs/PROGRESS.md)를 함께 관리합니다.
 
 현재 실행 가능한 명령은 `doctor`, `ingest`, `autolabel`, `review`, `review-batch`,
-`review-audit`, `release`, `restore`입니다. RTX 5060 Laptop
+`review-audit`, `release`, `restore`, `train`, `experiments`입니다. RTX 5060 Laptop
 8 GB에서 SAM 3 추론·재개를 검증했고, FiftyOne 브라우저에서 마스크 수정·승인·재검수를
 확인했습니다. 승인된 COCO 데이터를 DVC에 저장하고 Git 태그로 복원하는 경로도 구현했습니다.
-RF-DETR 학습과 MLflow 평가는 후속 단계입니다.
+RF-DETR 학습·MLflow 기록·체크포인트 재개와 저장 모델의 새 프로세스 복원을 검증했습니다.
+평가 CLI와 FiftyOne 평가 화면, `v002` 재학습 비교는 후속 단계입니다.
 
 ## Requirement
 
@@ -65,8 +66,9 @@ vloop doctor --config /absolute/path/project.yaml
 
 Python·의존성 버전, 필수 입력, 저장 경로 쓰기 가능 여부, DVC remote 위치,
 `nvidia-smi`, 실제 CUDA 행렬 연산, SAM 3 체크포인트 읽기와 SHA-256,
-설치된 SAM 3 소스 커밋을 확인합니다. 파일을 읽을 수 있다는 것과 모델 추론 성공은 별도 검사입니다.
-RF-DETR 가중치 접근 검사는 학습 adapter 구현 단계에 추가합니다.
+설치된 SAM 3 소스 커밋과 로컬 RF-DETR 가중치의 읽기·SHA-256을 확인합니다.
+파일을 읽을 수 있다는 것과 모델 추론 성공은 별도 검사입니다. RF-DETR 가중치가 없으면
+`rfdetr_checkpoint` 검사는 실패하며, `train_checkpoint: null`인 첫 학습에서 공식 가중치를 받습니다.
 
 검사에 실패하면 종료 코드는 `1`입니다. 현재 미입력 설정이나 미설치 후속 의존성으로 인해
 실패할 수 있으며, 보고서에서 항목별 결과를 확인할 수 있습니다. 격리 환경의 GPU 접근 오류만으로
@@ -486,6 +488,46 @@ DVC의 저장·전송은 다음 역할로 나뉩니다.
 `--prepare-only`는 대상·COCO·용량 추정을 준비하는 옵션이며 `add`까지만 실행하는 옵션은 아닙니다.
 `vloop restore`는 태그의 추적 정보를 읽어 내부적으로 `pull`을 수행합니다.
 
+#### pool이 생기고 재사용되는 순서: v001 → v002
+
+아래는 이미지 내용이 서로 다른 A·B를 `v001`로 릴리스한 뒤, 새 이미지 C를 더해
+A·B·C를 `v002`로 릴리스하는 예입니다. 실제 파일명에는 이미지 해시를 사용합니다.
+릴리스 작업 폴더는 `.vloop/runs/<RELEASE_JOB_ID>/dvc-work/dataset/`입니다.
+
+| 순서 | v001: A·B를 처음 릴리스 |
+|---|---|
+| 1 | `ingest`가 원본 A·B를 관리용 PNG로 저장하고 검수를 마칩니다. |
+| 2 | 승인 스냅샷·COCO를 만들고 **이미지 복사 전에 pool에서 A·B를 찾습니다.** 처음이므로 없습니다. |
+| 3 | 관리 PNG A·B를 이번 릴리스 작업 폴더에 실제 복사합니다. |
+| 4 | `dvc add`가 내용을 cache에 저장하고 작업 파일을 cache와 reflink/hardlink로 연결합니다. |
+| 5 | `dvc push`가 remote에 없는 내용을 전송합니다. |
+| 6 | 전송한 이미지의 **작업 파일에서 pool 경로로 hardlink를 생성**합니다. 이미지 내용은 복사하지 않습니다. |
+| 7 | 원격 데이터 검증·Git 태그 생성이 성공하면 **dvc-work 작업 폴더 전체를 삭제**합니다. cache·pool·remote는 남습니다. |
+
+4~6번은 이미지 해시 앞자리로 나눈 추적 폴더마다 실행합니다. hardlink는 한 경로를 따라가는
+바로가기가 아니라 같은 파일에 붙인 다른 경로이므로, 작업 폴더를 삭제해도 pool의 파일은 남습니다.
+DVC가 reflink를 선택하면 cache와 작업 파일은 디스크 블록을 공유하고, pool은 그 작업 파일과
+hardlink를 공유합니다. 현재 설정은 symlink나 일반 복사 방식으로의 fallback을 사용하지 않습니다.
+
+| 순서 | v002: 기존 A·B에 새 C를 추가 |
+|---|---|
+| 1 | C를 ingest·검수하고, v001의 메타데이터를 기준으로 기존 split을 유지한 새 스냅샷·COCO를 만듭니다. |
+| 2 | 새로운 릴리스 작업 폴더를 만들고 pool을 조회합니다. A·B는 있고 C는 없습니다. |
+| 3 | **A·B는 pool의 파일에서 새 작업 폴더로 hardlink를 생성**합니다. ingest에서 다시 복사하지 않습니다. |
+| 4 | **C만** ingest 관리 영역에서 작업 폴더로 실제 복사합니다. |
+| 5 | `dvc add`에서 기존 A·B의 캐시 내용을 재사용하고 C를 새로 저장합니다. 새 라벨·메타데이터도 추적합니다. |
+| 6 | `push`로 remote에 없는 내용을 전송하고, 작업 파일을 기준으로 pool의 링크를 갱신합니다. pool에는 A·B·C가 있습니다. |
+| 7 | 검증·태그 생성 성공 후 v002의 작업 폴더를 삭제합니다. |
+
+pool은 **다음 릴리스의 작업 폴더를 준비할 때 기존 이미지의 복사를 피하기 위한 공유 경로**입니다.
+DVC의 최종 중복 제거 자체에 필수인 폴더는 아닙니다. pool만 제거하면 현재 준비 로직은 기존
+이미지도 작업 폴더에 복사한 뒤 DVC에서 중복을 확인하게 됩니다. 복사 전 캐시 조회·재사용을
+다른 방식으로 구현하면 pool을 대체할 수 있습니다. 기존 이미지도 무결성 검사를 위해 읽습니다.
+
+`restore v001`/`restore v002`는 pool을 거치지 않고 해당 버전의 DVC 추적 정보를 사용해
+cache와 연결된 `restored/<version>/dataset/`을 구성합니다. pool에는 여러 릴리스의 이미지가
+모여 있고, restored에는 선택한 버전의 이미지·라벨·분할이 구성됩니다.
+
 원본을 보관한 채 최초 릴리스까지 만들면 **원본, 관리 PNG, DVC 로컬 캐시, DVC remote**의
 네 저장 계층이 생깁니다. 원본 JPEG가 PNG로 변환되면 크기가 커질 수 있고, 릴리스에는 승인된
 대상만 들어가므로 원본 용량의 정확히 네 배라는 뜻은 아닙니다. 용량과 시간은 다음처럼 구분합니다.
@@ -604,6 +646,144 @@ vloop restore --version v001
 선택합니다. 원본 `image_dir`나 게시자의 FiftyOne DB·SAM 3 체크포인트 없이 복원할 수 있습니다.
 복원한 버전들은 같은 로컬 캐시를 재사용하며, 재복원도 체크섬 검증에는 시간이 듭니다.
 
+## Train / MLflow
+
+**지정한 릴리스를 복원해 RF-DETR Seg Nano를 학습하고, 실행별 데이터·설정·모델을 MLflow에
+기록합니다.** 실행 중인 FiftyOne의 라벨 변경은 이미 확정된 학습 입력에 반영되지 않습니다.
+학습 전에 위 `pipeline` extra를 설치하고 사용할 릴리스와 DVC remote를 준비합니다.
+
+```shell
+vloop train --dataset-version v001 --notes "첫 기준 모델"
+vloop experiments
+# 브라우저를 자동으로 열지 않고 같은 서버 실행
+vloop experiments --no-browser
+```
+
+`train`이 내부에서 복원하므로 `restore`를 먼저 실행할 필요는 없습니다. 다른 컴퓨터에서 받은
+릴리스라면 앞 절의 Git 태그 수신과 DVC remote 설정이 필요합니다. 원본 이미지 폴더나
+SAM 3 체크포인트는 학습에 필요하지 않습니다. 클래스 매핑은 릴리스에 저장된 값을 사용합니다.
+train과 val에 각각 이미지와 하나 이상의 정답 객체가 있어야 합니다. 승인된 빈 정답 이미지도
+함께 학습하며, 전체 val이 빈 정답이면 최적 모델을 고를 mask mAP를 계산할 수 없어 시작을 거부합니다.
+
+학습 코드를 추적하기 위해 **현재 코드 저장소를 커밋한 상태에서 실행**합니다. 미커밋 변경이나
+추적되지 않은 파일이 있으면 실패 처리합니다. Git에서 제외한 `project.yaml`은 실험마다 바꿀 수
+있고, 실제 사용한 설정은 별도로 기록합니다. `train`은 Git 커밋이나 push를 자동 수행하지 않습니다.
+
+### 학습 설정과 기록
+
+```yaml
+train_model: RFDETRSegNano
+epochs: 30
+batch_size: 1
+grad_accum_steps: 8
+learning_rate: 0.0001
+train_checkpoint: null
+train_num_workers: 0
+train_gradient_checkpointing: false
+```
+
+- `train_checkpoint: null`이면 첫 학습에서 공식 Seg Nano 가중치를
+  `storage_dir/models/rfdetr/rf-detr-seg-nano.pt`에 받고 검증한 뒤 재사용합니다.
+  직접 준비한 초기 가중치는 로컬 경로로 지정할 수 있습니다. **학습 재개에는 아래 run ID 옵션을
+  사용합니다.** 초기 가중치 지정만으로 이전 옵티마이저·에포크 상태를 이어가지는 않습니다.
+- 입력 해상도는 모델 기본값 312이며, RF-DETR의 기본 다중 해상도 증강을 사용하므로 실제 학습
+  입력 크기는 달라질 수 있습니다. 전체 모델·학습 기본값까지 `training.json`에 저장합니다.
+  GPU 정밀도는 공식 trainer가 선택하고 실제 값을 기록합니다. 검증한 RTX 5060에서는 BF16입니다.
+- `train_num_workers: 0`은 큰 COCO 인덱스를 여러 작업 프로세스로 복제하는 비용을 줄이기 위한
+  초기 설정입니다. `train_gradient_checkpointing`은 중간 활성값을 재계산해 GPU 메모리를
+  줄이는 선택 사항이며, 속도와 메모리를 확인하고 새 실험에서 변경합니다.
+- 학습은 train으로 수행하고 에포크별 검증에는 val(`valid/`)을 사용합니다. 최종 test는 자동
+  실행하지 않습니다. 최적 모델은 regular/EMA 중 가장 높은 **validation mask mAP**로 선택합니다.
+- MLflow에는 데이터 태그의 실제 Git 커밋, DVC 추적 정보, 이미지·라벨 식별자, 학습 코드 커밋,
+  클래스 매핑, 설정, 의존성 버전, 초기 가중치 해시, 에포크별 손실·검증 지표를 남깁니다.
+  `--notes`는 실험 목적·관찰 메모이며 MLflow 화면에서도 확인할 수 있습니다.
+
+MLflow 메타데이터는 `storage_dir/mlflow/mlflow.db`, 모델 파일은
+`storage_dir/mlflow/artifacts/<RUN_ID>/artifacts/`에 보관합니다. 모델·체크포인트는 이 로컬
+아티팩트 경로에 원자적으로 저장하며 MLflow 화면에서도 조회할 수 있습니다.
+
+```text
+<RUN_ID>/artifacts/
+├── training.json          # 고정 데이터·코드·설정·매핑·초기 가중치 해시
+├── config.json            # 실제 적용한 프로젝트 설정
+├── dependencies.json      # 실행 환경의 설치 버전
+├── report.json            # 완료·실패·중단 상태와 결과 위치
+├── model/
+│   ├── best.pt            # 최적 추론용 가중치와 모델 구성
+│   └── model.json         # 클래스 매핑·전처리·후처리·가중치 해시
+└── resume/
+    ├── epoch-<번호>.ckpt  # 마지막 완료 에포크의 전체 학습 상태
+    └── latest.json        # 재개 체크포인트 위치·해시·에포크·step
+```
+
+재개용 체크포인트에는 옵티마이저·스케줄러·에포크·step·EMA·난수 상태와 이전 최적 모델을
+포함하므로 `best.pt`보다 큽니다. 같은 run에서는 새 체크포인트를 저장하고 참조 정보를 갱신한
+뒤 이전 재개 파일을 정리합니다. 이전 run의 결과는 보존하며 여러 run 사이의 모델 중복 제거는
+하지 않습니다. 이 모델 아티팩트는 데이터 릴리스의 DVC remote에 자동 업로드되지 않습니다.
+
+### 중단한 학습 재개
+
+```shell
+vloop train --resume <TRAIN_JOB_ID>
+```
+
+사용자는 학습 시작 시 출력하는 **`train_...` 형태의 vloop 작업 ID만 사용**합니다. 보고서의
+`run_id`에는 MLflow가 생성한 내부 ID를 저장하고, 재개 시 그 값을 읽어 원래 MLflow run의
+체크포인트를 찾습니다. 이름이나 시각으로 추정하지 않으며 MLflow의 `vloop.job_id` 태그와
+보고서의 대응도 확인합니다. MLflow 화면의 실행 이름은 vloop 작업 ID입니다.
+
+재개하면 **새 vloop 작업 ID·폴더·보고서와 새 MLflow run을 생성**합니다. 예를 들어
+`train_A`를 재개하면 `train_B`에서 기록을 시작하고 `resume_from_job_id = train_A`를 남깁니다.
+MLflow에는 `vloop.resume_from_job_id`와 내부 연결용 `vloop.resume_from_run_id`를 자동 기록합니다.
+원래 폴더와 중단 상태는 보존하며, 새 지표를 원래 run에 이어 쓰지 않습니다.
+
+MLflow 초기화가 실패해도 vloop 작업 폴더의 설정·오류·보고서는 남습니다. 초기화 전에 실패한
+작업에는 MLflow 체크포인트가 없으므로 원인을 해결한 뒤 `train --dataset-version ...`로 새로
+시작합니다. 작업 ID가 있다는 것과 재개 가능한 학습 체크포인트가 있다는 것은 별개입니다.
+
+원래 run의 데이터 버전·학습 설정을 가져오므로 현재 YAML의 `epochs`, 학습률 등을 바꿔도
+재개에는 적용하지 않습니다. 이 로컬 구현은 원래 작업의 `runs/<TRAIN_JOB_ID>/report.json`과
+MLflow 저장소에 접근할 수 있어야 합니다.
+원래 코드 커밋과 학습 의존성 버전이 같아야 하며, 태그·고정 설정·체크포인트 해시가 달라지면
+재개를 거부합니다. 로컬 저장소와 DVC remote 경로는 현재 설정으로 연결합니다.
+
+체크포인트는 **에포크 완료 시점**에 저장합니다. 에포크 도중 중단되면 마지막으로 완료한
+에포크 다음부터 다시 실행하며, 중단된 에포크의 일부 배치는 다시 처리할 수 있습니다.
+첫 에포크 저장 전 중단되었다면 새 학습을 시작합니다. 원래 지정한 총 에포크 수까지 이미
+완료했으면 `--resume`로 학습 횟수를 늘리지 않습니다. 설정 변경은 새 실험으로 실행합니다.
+재개 시 이전 최적 모델도 이어받으므로 이후 성능이 나빠져도 이전 최적 가중치를 잃지 않습니다.
+
+일반적인 중단은 MLflow `KILLED`, 오류는 `FAILED`, 완료는 `FINISHED`로 기록합니다.
+프로세스 강제 종료나 전원 차단 때는 상태가 `RUNNING`으로 남을 수 있지만, 이미 저장된
+체크포인트로 재개할 수 있습니다. 전체 실행의 비트 단위 동일성까지 보장하지는 않습니다.
+
+### 실험 화면과 검증 범위
+
+`vloop experiments`는 같은 SQLite와 아티팩트 저장소를 사용해
+`http://127.0.0.1:5000`에서 MLflow를 실행합니다. 포트는 `mlflow_port`로 변경합니다.
+별도 터미널에서 학습 중에도 화면을 볼 수 있고, 화면 서버를 꺼도 학습 기록은 계속 저장됩니다.
+`Ctrl+C`로 서버를 종료합니다. 화면을 열었다고 학습이 시작되지는 않습니다.
+
+RF-DETR 1.8.2와 Lightning 2.6.5에서 확인한 두 호환성 처리는 프로젝트 adapter에 있습니다.
+누적 배치 손실의 중복 나눗셈을 보정하고, 프로젝트의 N개 클래스 밖 추가 출력 채널을 top-k
+선택 전에 제외합니다. 검증과 저장 모델의 후처리에 같은 규칙을 적용하며, 설치된 라이브러리
+소스는 수정하지 않습니다. 저장 모델은 `vloop.trained_model.load_model(cfg, job_id)`에
+같은 vloop 학습 작업 ID를 넘겨 복원합니다.
+현재 YAML의 클래스·임계값 대신 아티팩트의 매핑·전후처리 설정을 기준으로 후속 평가를 구성합니다.
+[RF-DETR 공식 학습 인터페이스](https://rfdetr.roboflow.com/1.8.2/learn/train/)
+
+생성한 소형 이미지 4장으로 실제 DVC 릴리스 → GPU 학습 → 첫 에포크 후 중단 → 새 프로세스
+재개 → 모델 복원·마스크 추론을 검증했습니다. 최대 PyTorch GPU 할당 약 1.25 GiB,
+예약 약 1.30 GiB, 프로세스 최대 RSS 약 4.10 GiB였습니다. 이는 실행 경로 검증이며 실제
+도메인 데이터의 정확도·메모리 보장값은 아닙니다. 검증 기록은 `.vloop/train-integration.json`에
+있고, 검증에 사용한 임시 데이터·모델·DB는 정리됩니다.
+
+별도 COCO 인덱스 측정에서는 100만 이미지·100만 단순 RLE 라벨의 JSON 약 275 MiB를
+약 6.19초에 읽었고 프로세스 최대 RSS는 약 2.27 GiB였습니다. 모델·이미지 픽셀 로딩·증강·
+옵티마이저·검증 예측 누적은 포함하지 않습니다. 실제 마스크의 복잡도와 객체 수에 따라
+메모리가 증가하며, 전체 학습은 작은 도메인 데이터로 먼저 확인합니다.
+측정 스크립트는 `tests/train_loader_scale_runner.py`, 결과는 `.vloop/train-loader-scale.json`입니다.
+
 ## Results / Recovery
 
 ```text
@@ -637,7 +817,7 @@ vloop restore --version v001
 - 데이터 변경 작업이 겹치면 잠금 오류를 반환합니다. 검수 서버는 검사할 때만 잠금을 사용합니다.
 
 FiftyOne DB와 모델 저장소는 프로젝트의 `storage_dir` 아래에 둡니다. 앱 연결 주소는
-`127.0.0.1`로 설정합니다. MLflow 서버를 여는 명령은 후속 단계입니다.
+`127.0.0.1`로 설정합니다. MLflow 서버는 `vloop experiments`로 엽니다.
 완성된 학습 데이터 버전은 위의 `release` / `restore` 절차로 저장·복원합니다.
 이미지·모델·DB를 Git에 직접 추가하지 않습니다.
 
@@ -655,6 +835,22 @@ ruff format --check src tests
 
 ```shell
 VLOOP_TEST_FIFTYONE=1 python -m pytest tests/test_fiftyone_integration.py tests/test_review_integration.py tests/test_review_batch_integration.py -q
+```
+
+DVC·FiftyOne·MLflow 로컬 서버까지 포함한 통합 검증:
+
+```shell
+VLOOP_TEST_FIFTYONE=1 VLOOP_TEST_RELEASE=1 VLOOP_TEST_MLFLOW=1 python -m pytest -q
+```
+
+RF-DETR GPU 검증은 별도로 실행합니다. 기본 관리 경로의 공식 Seg Nano 가중치가 필요하며,
+임시 Git 저장소·DVC 릴리스·MLflow DB와 생성 이미지 4장을 사용합니다. 첫 에포크 후 중단,
+별도 프로세스에서 설정을 보존한 재개, 새 프로세스에서 저장 모델의 추론까지 확인합니다.
+
+```shell
+VLOOP_TEST_TRAIN=1 python -m pytest tests/test_train_integration.py -q
+# 100만 건 COCO 인덱스 로딩만 측정: 실제 픽셀 읽기·학습은 포함하지 않음
+python tests/train_loader_scale_runner.py --count 1000000
 ```
 
 100만 건의 합성 메타데이터를 SQLite 작업 목록으로 만드는 메모리 검증:
@@ -697,6 +893,13 @@ src/vloop/
 ├── approval.py     # 정답 스냅샷·해시와 승인 일치 검사
 ├── review_operators.py # FiftyOne 검수 operator
 ├── review_plugin/  # 프로젝트에 설치할 플러그인 등록 파일
+├── release.py      # 승인 데이터 스냅샷과 릴리스 흐름
+├── release_data.py # 승인 스냅샷·분할·COCO 스트리밍 생성·검증
+├── release_dvc.py  # DVC 저장·태그·격리 복원
+├── train.py        # 릴리스 복원, 고정 학습 설정과 재개
+├── training_engine.py # RF-DETR Lightning 학습·최적 모델·전체 체크포인트
+├── tracking.py     # MLflow 실행·아티팩트·localhost 화면
+├── trained_model.py # 저장된 추론 모델·클래스·후처리 복원
 └── runtime.py      # 해시, 실행 기록, 잠금
 tests/
 docs/

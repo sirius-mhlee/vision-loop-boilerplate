@@ -88,7 +88,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     restore = commands.add_parser("restore", help="Restore a tagged dataset into a separate cache")
     restore.add_argument("--version", required=True, help="Dataset version, e.g. v001")
-    for command in (doctor, ingest, autolabel, review, batch, audit, release, restore):
+    train = commands.add_parser("train", help="Train a dataset release and record an MLflow run")
+    selection = train.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--dataset-version", help="Dataset version, e.g. v001")
+    selection.add_argument(
+        "--resume", metavar="JOB_ID", help="Resume a recorded vloop training job"
+    )
+    train.add_argument("--notes", help="Experiment purpose or observations recorded in MLflow")
+    experiments = commands.add_parser("experiments", help="Serve the local MLflow experiment UI")
+    experiments.add_argument("--no-browser", action="store_true", help="Do not open a browser")
+    for command in (
+        doctor,
+        ingest,
+        autolabel,
+        review,
+        batch,
+        audit,
+        release,
+        restore,
+        train,
+        experiments,
+    ):
         command.add_argument("--config", default=argparse.SUPPRESS, help="Path to project YAML")
     return parser.parse_args(argv)
 
@@ -97,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         cfg = load_config(args.config)
+        if args.command == "experiments":
+            from .tracking import experiments
+
+            return experiments(cfg, no_browser=args.no_browser)
         if args.command == "doctor":
             from .doctor import doctor
 
@@ -141,10 +165,19 @@ def main(argv: list[str] | None = None) -> int:
                 include_auto_train=args.include_auto_accepted,
                 prepare_only=args.prepare_only,
             )
-        else:
+        elif args.command == "restore":
             from .release import restore
 
             report = restore(cfg, version=args.version)
+        else:
+            from .train import train
+
+            report = train(
+                cfg,
+                dataset_version=args.dataset_version,
+                resume=args.resume,
+                notes=args.notes,
+            )
     except (OSError, ValueError, RuntimeError, yaml.YAMLError) as exc:
         print(f"vloop: {exc}", file=sys.stderr)
         return 2
@@ -187,6 +220,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Preview only. Apply: vloop review-batch --resume {report['job_id']} --apply")
     elif args.command == "review-audit":
         print(f"Audited: {report.get('checked', 0)}, invalidated: {report.get('invalidated', 0)}")
+    elif args.command == "train":
+        print(f"Epochs completed: {report.get('epochs_completed', 0)}")
+        if report.get("best_mask_map") is not None:
+            print(f"Best validation mask mAP: {report['best_mask_map']:.6f}")
+        if report.get("model_dir"):
+            print(f"Model: {report['model_dir']}")
     else:
         for split, counts in report.get("summary", {}).get("splits", {}).items():
             print(

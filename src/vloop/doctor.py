@@ -65,6 +65,16 @@ def check_checkpoint(cfg: Config) -> str:
     )
 
 
+def check_train_checkpoint(cfg: Config) -> str:
+    path = cfg.train_checkpoint or cfg.storage_dir / "models/rfdetr/rf-detr-seg-nano.pt"
+    if not path.is_file() or path.stat().st_size == 0:
+        raise ValueError(
+            f"RF-DETR weights not found: {path}; first train downloads official weights "
+            "when train_checkpoint is null"
+        )
+    return f"Readable; sha256={sha256_file(path)}; model loading is checked during train"
+
+
 def check_sam3_source(cfg: Config) -> str:
     if cfg.sam3_source_dir is None or cfg.sam3_commit is None:
         raise ValueError(
@@ -172,6 +182,7 @@ def doctor(cfg: Config, *, sam3_image: Path | None = None) -> dict:
             check("cuda", lambda: check_cuda(cfg.device))
             check("sam3_checkpoint", lambda: check_checkpoint(cfg))
             check("sam3_source", lambda: check_sam3_source(cfg))
+            check("rfdetr_checkpoint", lambda: check_train_checkpoint(cfg))
             report["sam3_inference"] = "not_requested"
             if sam3_image is not None:
                 from .sam3 import smoke_predict
