@@ -6,11 +6,12 @@ A boilerplate for an iterative computer vision pipeline covering auto-labeling, 
 원본 [구현 계획](docs/PLAN.md)과 현재 [진행 상태](docs/PROGRESS.md)를 함께 관리합니다.
 
 현재 실행 가능한 명령은 `doctor`, `ingest`, `autolabel`, `review`, `review-batch`,
-`review-audit`, `release`, `restore`, `train`, `experiments`입니다. RTX 5060 Laptop
+`review-audit`, `release`, `restore`, `train`, `evaluate`, `experiments`입니다. RTX 5060 Laptop
 8 GB에서 SAM 3 추론·재개를 검증했고, FiftyOne 브라우저에서 마스크 수정·승인·재검수를
 확인했습니다. 승인된 COCO 데이터를 DVC에 저장하고 Git 태그로 복원하는 경로도 구현했습니다.
 RF-DETR 학습·MLflow 기록·체크포인트 재개와 저장 모델의 새 프로세스 복원을 검증했습니다.
-평가 CLI와 FiftyOne 평가 화면, `v002` 재학습 비교는 후속 단계입니다.
+평가 CLI와 박스·마스크 지표, FiftyOne 분석 화면을 연결했습니다.
+실제 도메인 데이터의 `v002` 재학습 비교는 후속 단계입니다.
 
 ## Requirement
 
@@ -31,6 +32,10 @@ SAM 3 패키지 자체와 체크포인트는 포함하지 않으므로 아래 �
 
 `pipeline` extra는 FiftyOne·RF-DETR·MLflow·DVC를 설치하며, 해당 단계 작업 시 추가합니다.
 FiftyOne은 두 extra에 같은 버전으로 선언되어 있어 함께 선택해도 중복 설치되지 않습니다.
+FiftyOne 하위 패키지 ETA 0.17과 MLflow를 같은 프로세스에서 사용하기 위해
+`importlib-metadata==7.2.1`도 고정합니다. 8 이상에서는 누락된 메타데이터 키 조회가
+`KeyError`로 바뀌어 현재 ETA의 `author` 조회가 실패합니다.
+[importlib-metadata 변경 기록](https://importlib-metadata.readthedocs.io/en/latest/history.html#v8-0-0)
 
 ```shell
 python -m pip install -e '.[pipeline]'
@@ -784,6 +789,95 @@ RF-DETR 1.8.2와 Lightning 2.6.5에서 확인한 두 호환성 처리는 프로�
 메모리가 증가하며, 전체 학습은 작은 도메인 데이터로 먼저 확인합니다.
 측정 스크립트는 `tests/train_loader_scale_runner.py`, 결과는 `.vloop/train-loader-scale.json`입니다.
 
+## Evaluate
+
+학습이 출력한 **vloop 학습 작업 ID**로 저장된 최적 모델을 평가합니다. 평가도 별도의
+`evaluate_...` 작업 ID를 만들며, MLflow 내부 ID를 직접 입력하지 않습니다.
+
+```shell
+# 기본값: 학습에 사용한 데이터 버전의 val 전체
+vloop evaluate --job-id TRAIN_JOB_ID
+
+# 처음에는 작은 범위에서 속도·메모리 확인
+vloop evaluate --job-id TRAIN_JOB_ID --dataset-version v001 --limit 100
+
+# 완료된 평가 화면 열기: 위 명령에서 출력한 evaluate_... ID 사용
+vloop evaluate --view EVALUATE_JOB_ID
+vloop evaluate --view EVALUATE_JOB_ID --no-browser
+
+# 최종 test 평가는 명시적으로 선택
+vloop evaluate --job-id TRAIN_JOB_ID --dataset-version v001 --split test
+```
+
+계산 명령은 지표를 저장한 후 종료합니다. `--view`는 저장된 결과를 열고, `--no-browser`는
+브라우저 자동 실행 없이 localhost 서버를 유지합니다. `Ctrl+C`로 닫습니다.
+`--view`에는 데이터 버전·임계값 등 계산 옵션을 함께 넣을 수 없습니다.
+평가 기본값은 `val`입니다. YAML의 `eval_split`을 `test`로 바꿔도 자동으로 test를 평가하지
+않으며 명령에서 `--split test`를 요구합니다.
+
+평가 이미지는 DVC 릴리스에서 복원합니다. 현재 YAML의 클래스가 아니라 **저장 모델과 릴리스의
+클래스 ID·이름·모델 인덱스**를 대조합니다. 검수 중인 `ground_truth`를 읽거나 변경하지 않으며,
+평가용 FiftyOne 데이터셋 `vloop-eval-EVALUATE_JOB_ID`를 따로 만듭니다.
+릴리스 GT와 예측 필드는 화면에서 읽기 전용으로 설정합니다.
+
+| 결과 | 계산 기준 |
+|---|---|
+| 박스 mAP / AP50 | 모델의 원본 이미지 좌표 박스 IoU |
+| 마스크 mAP / AP50 | 원본 크기 이진 마스크의 실제 픽셀 IoU |
+| 클래스별 AP / AP50 | 정답 객체가 없는 클래스는 `null` / N/A, 평균에서 제외 |
+| TP / FP / FN | 추론 임계값을 통과한 예측, 같은 클래스끼리 IoU 0.5에서 매칭 |
+
+FiftyOne의 COCO 평가를 사용합니다. mAP는 IoU 0.50부터 0.95까지 0.05 간격과
+101개 recall 지점으로 계산합니다. 마스크가 예측 박스 밖에 있어도 잘라내지 않도록
+박스용·마스크용 예측 필드를 분리합니다. 빈 예측과 사람이 승인한 빈 정답 이미지도 포함하고,
+면적이 0인 예측 마스크는 제거하지 않아 마스크 FP로 계산합니다.
+[FiftyOne 박스·마스크 평가](https://docs.voxel51.com/user_guide/evaluation/detections.html)
+
+기본 추론 임계값 `0.001`, 표시 임계값 `0.5`, 이미지당 최대 검출 수 `100`은 **학습할 때
+모델에 저장한 설정**에서 읽습니다. 현재 YAML 변경은 기존 모델의 평가에 자동 반영되지 않습니다.
+다른 기준을 시험하려면 새 평가 명령에서 `--confidence`, `--display-confidence`,
+`--max-detections`로 명시적으로 변경합니다. 표시 임계값은 추론 임계값 이상이어야 하고,
+최대 검출 수는 저장 모델의 top-k 한도를 넘을 수 없습니다.
+
+화면은 `display_confidence` 저장 뷰로 열립니다. `all`은 낮은 추론 임계값을 통과한 모든 예측,
+`boxes_fp`, `boxes_fn`, `masks_fp`, `masks_fn`은 해당 오류가 있는 이미지,
+`empty_predictions`는 예측이 하나도 없는 이미지입니다. 평가 키에서 evaluation patches로
+매칭 객체도 확인할 수 있습니다. 화면에서 표시 임계값을 바꿔도 이미 저장한 mAP·FP·FN은
+다시 계산되지 않습니다. 오류 뷰에는 낮은 점수의 FP도 포함될 수 있습니다.
+
+평가 아티팩트는 MLflow 로컬 아티팩트 폴더에 저장합니다.
+
+```text
+evaluation.json     # 학습 출처·모델 정보, 데이터 태그, 선택 입력, 평가 설정·비교 해시
+samples.sqlite3     # 선택한 이미지·고정 GT·박스/마스크 예측 RLE·처리 오류
+metrics.json        # 박스/마스크 지표, 클래스별 AP, TP/FP/FN
+config.json         # 실행한 프로젝트 설정
+dependencies.json   # 실제 설치 의존성
+report.json         # 완료/실패, 처리 건수, 결과 체크섬, 소요 시간·프로세스 최대 RSS
+```
+
+이미지 자체를 아티팩트에 다시 복사하지 않습니다. `--view`는 결과 체크섬과 데이터 태그를
+검사하고, 평가용 FiftyOne 데이터셋이 없어졌다면 아티팩트에서 다시 구성합니다. 모델 추론은
+다시 하지 않습니다. 로컬 작업 보고서·MLflow 아티팩트, 원래 데이터 Git 태그와 DVC remote가
+필요합니다. 실패·중단된 평가는 전체 지표로 인정하지 않고 오류를 남깁니다. 현재 평가는
+재개 옵션 없이 새 명령으로 다시 계산하며, 화면 재구성은 완료된 평가에만 허용합니다.
+
+`comparison_id`는 실제 평가 이미지·정답·클래스 매핑·split·계산 설정이 같은지 확인하는
+기준입니다. 학습 작업 ID나 학습 데이터 버전, 로컬 저장 경로, 표시 임계값은 제외합니다.
+따라서 `v001`과 `v002` 모델을 동일한 `v001`의 val로 평가하면 비교할 수 있습니다.
+`--limit`은 이미지 ID 순서로 앞 N장을 선택하며, 선택 범위가 달라지면 비교 해시도 달라집니다.
+작은 일부 이미지의 점수를 val 전체 결과로 해석하지 않습니다.
+
+입력·예측은 SQLite로 저장하고 추론은 한 장씩, FiftyOne 적재는 20장씩 처리합니다. 다만
+**FiftyOne의 mAP 계산은 전체 객체 매칭 결과를 RAM에 모읍니다. 100만 장 전체 평가의 메모리
+상한은 보장하지 않습니다.** 평가 DB도 이미지당 GT·예측 라벨 공간을 사용합니다.
+`--limit`은 추론·평가 대상을 제한하지만 현재 DVC 복원은 해당 버전의 모든 split을 복원·검사합니다.
+처음에는 작은 val 범위로 `report.json`의 `peak_rss_mib`와 시간을 확인하고 범위를 늘립니다.
+이 RSS는 모델 로딩을 포함한 Python 프로세스 최대값이며 별도 MongoDB 서버 메모리는 제외합니다.
+생성 이미지 4장의 GPU 통합 검증에서는 val/test 각각 1장을 평가했고 프로세스 최대 RSS는
+약 2.19 GiB였습니다. 평가 데이터셋을 지운 뒤 재구성·HTTP 응답·서버 종료까지 확인했으며,
+기록은 `.vloop/evaluate-integration.json`에 있습니다. 실제 데이터의 성능 보장값은 아닙니다.
+
 ## Results / Recovery
 
 ```text
@@ -841,11 +935,14 @@ DVC·FiftyOne·MLflow 로컬 서버까지 포함한 통합 검증:
 
 ```shell
 VLOOP_TEST_FIFTYONE=1 VLOOP_TEST_RELEASE=1 VLOOP_TEST_MLFLOW=1 python -m pytest -q
+# 평가 지표의 정답·오답·빈 예측과 아티팩트 화면 복원만 검증
+VLOOP_TEST_FIFTYONE=1 python -m pytest tests/test_evaluate_integration.py -q
 ```
 
 RF-DETR GPU 검증은 별도로 실행합니다. 기본 관리 경로의 공식 Seg Nano 가중치가 필요하며,
 임시 Git 저장소·DVC 릴리스·MLflow DB와 생성 이미지 4장을 사용합니다. 첫 에포크 후 중단,
-별도 프로세스에서 설정을 보존한 재개, 새 프로세스에서 저장 모델의 추론까지 확인합니다.
+별도 프로세스에서 설정을 보존한 재개, 새 프로세스에서 저장 모델의 추론, val/test 평가,
+평가 데이터셋 삭제 후 아티팩트 복원과 FiftyOne HTTP 응답까지 확인합니다.
 
 ```shell
 VLOOP_TEST_TRAIN=1 python -m pytest tests/test_train_integration.py -q
@@ -900,6 +997,9 @@ src/vloop/
 ├── training_engine.py # RF-DETR Lightning 학습·최적 모델·전체 체크포인트
 ├── tracking.py     # MLflow 실행·아티팩트·localhost 화면
 ├── trained_model.py # 저장된 추론 모델·클래스·후처리 복원
+├── evaluate.py     # 평가 실행·MLflow 기록·아티팩트 검증과 화면 복원
+├── evaluation_data.py # 고정 평가 입력·예측 SQLite, 좌표 검증·비교 해시
+├── evaluation_view.py # FiftyOne 박스/마스크 COCO 평가와 오류 뷰
 └── runtime.py      # 해시, 실행 기록, 잠금
 tests/
 docs/

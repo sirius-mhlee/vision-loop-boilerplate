@@ -48,7 +48,9 @@ split_ratios: [0.8, 0.1, 0.1]
 # Optional FiftyOne string field identifying a capture/scene group.
 # null treats each image as its own group; supply group metadata before the first release.
 release_group_field: null
+# Final test evaluation still requires explicit --split test.
 eval_split: val
+# Stored with each trained model; evaluate uses these saved defaults, not later YAML edits.
 eval_confidence: 0.001
 display_confidence: 0.5
 eval_max_detections: 100

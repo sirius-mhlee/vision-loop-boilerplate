@@ -1,4 +1,4 @@
-"""Isolated real DVC -> GPU training -> new-process resume -> artifact reload."""
+"""Isolated DVC -> GPU training/resume -> new-process evaluation and artifact recovery."""
 
 import argparse
 import json
@@ -78,6 +78,27 @@ def child(mode, cfg_path, job_id=None):
                 "classes": metadata["classes"],
             },
         )
+    elif mode == "evaluation-view":
+        import urllib.request
+
+        from vloop.evaluate import load_evaluation
+        from vloop.evaluation_view import close_session
+        from vloop.fiftyone import configure_fiftyone
+
+        cfg = load_config(cfg_path)
+        fo = configure_fiftyone(cfg)
+        report = json.loads((cfg.storage_dir / "runs" / job_id / "report.json").read_text())
+        fo.delete_dataset(report["evaluation_dataset"])
+        dataset = load_evaluation(cfg, job_id)
+        assert dataset.info["metrics"] == report["metrics"]
+        session = fo.launch_app(dataset, address="127.0.0.1", port=cfg.fiftyone_port, remote=True)
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{cfg.fiftyone_port}", timeout=15
+            ) as response:
+                assert response.status == 200
+        finally:
+            close_session(session)
 
 
 def run(destination):
@@ -152,7 +173,7 @@ def run(destination):
                     timeout=600,
                 )
             if result.returncode:
-                errors = list((cfg.storage_dir / "runs").glob("train_*/error.txt"))
+                errors = sorted((cfg.storage_dir / "runs").glob("*/error.txt"))
                 detail = errors[-1].read_text() if errors else ""
                 raise AssertionError(log.read_text()[-8000:] + "\n" + detail)
 
@@ -218,6 +239,52 @@ def run(destination):
                 second["job_id"],
             ],
         )
+        # Evaluation must use the saved mapping/thresholds, independent of current YAML.
+        data.update(classes=[], eval_confidence=0.8, display_confidence=0.95)
+        cfg.config_path.write_text(yaml.safe_dump(data))
+        evaluations = {}
+        for split in ("val", "test"):
+            execute(
+                "evaluate-" + split,
+                [
+                    "-m",
+                    "vloop",
+                    "evaluate",
+                    "--config",
+                    str(cfg.config_path),
+                    "--job-id",
+                    second["job_id"],
+                    *(["--split", "test"] if split == "test" else []),
+                ],
+            )
+            reports = sorted((cfg.storage_dir / "runs").glob("evaluate_*/report.json"))
+            evaluated = json.loads(reports[-1].read_text())
+            assert evaluated["status"] == "completed", evaluated
+            assert (
+                evaluated["split"] == split and evaluated["images"] == evaluated["predicted"] == 1
+            )
+            eval_artifacts = artifact_directory(client.get_run(evaluated["run_id"]))
+            evaluation = json.loads((eval_artifacts / "evaluation.json").read_text())
+            assert evaluation["parameters"]["confidence"] == 0.001
+            assert (
+                evaluation["selection"]["classes"]
+                == json.loads((cfg.storage_dir / "model-reload.json").read_text())["classes"]
+            )
+            assert evaluated["metrics"]["masks"]["per_class"]["absent"]["AP"] is None
+            evaluations[split] = evaluated
+        assert evaluations["val"]["comparison_id"] != evaluations["test"]["comparison_id"]
+        execute(
+            "evaluation-view",
+            [
+                script,
+                "--mode",
+                "evaluation-view",
+                "--config",
+                str(cfg.config_path),
+                "--job-id",
+                evaluations["val"]["job_id"],
+            ],
+        )
         assert git(root, "rev-parse", "HEAD") == before
         assert not git(root, "status", "--porcelain")
         result = {
@@ -226,6 +293,7 @@ def run(destination):
             "elapsed_seconds": time.monotonic() - started,
             "reload": json.loads((cfg.storage_dir / "model-reload.json").read_text()),
             "fixture": "4 generated images, sparse classes 7/42, real DVC + GPU + MLflow",
+            "evaluations": evaluations,
         }
         write_json(destination, result)
         print(json.dumps(result, indent=2))
@@ -233,7 +301,7 @@ def run(destination):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["release", "interrupt", "load"])
+    parser.add_argument("--mode", choices=["release", "interrupt", "load", "evaluation-view"])
     parser.add_argument("--config", type=Path)
     parser.add_argument("--job-id")
     parser.add_argument("--output", type=Path, default=Path(".vloop/train-integration.json"))

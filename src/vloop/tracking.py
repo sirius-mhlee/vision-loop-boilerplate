@@ -29,7 +29,9 @@ def client_for(cfg):
     return MlflowClient(tracking_uri=cfg.mlflow_tracking_uri)
 
 
-def create_run(cfg, job_id, *, parent=None, notes=None):
+def create_run(cfg, job_id, *, parent=None, notes=None, kind="train"):
+    if kind not in ("train", "evaluate"):
+        raise ValueError("Unsupported MLflow job kind")
     client = client_for(cfg)
     experiment = client.get_experiment_by_name(cfg.dataset_name)
     if experiment is None:
@@ -39,7 +41,7 @@ def create_run(cfg, job_id, *, parent=None, notes=None):
         )
     else:
         experiment_id = experiment.experiment_id
-    tags = {"vloop.kind": "train", "vloop.job_id": job_id, "mlflow.runName": job_id}
+    tags = {"vloop.kind": kind, "vloop.job_id": job_id, "mlflow.runName": job_id}
     if parent:
         tags["vloop.resume_from_run_id"] = parent
     if notes:
@@ -57,28 +59,31 @@ def artifact_directory(run):
     return path
 
 
-def run_id_for_job(client, cfg, job_id):
+def run_id_for_job(client, cfg, job_id, *, command="train"):
     """Resolve the recorded ID mapping; never guess a run from its name or timestamp."""
+    if command not in ("train", "evaluate"):
+        raise ValueError("Unsupported job command")
+    title = "Training" if command == "train" else "Evaluation"
     if not isinstance(job_id, str) or not re.fullmatch(
-        r"train_[0-9]{8}T[0-9]{6}_[0-9a-f]{8}", job_id
+        command + r"_[0-9]{8}T[0-9]{6}_[0-9a-f]{8}", job_id
     ):
-        raise ValueError("Use a vloop training job ID: train_<timestamp>_<suffix>")
+        raise ValueError(f"Use a vloop {title.lower()} job ID: {command}_<timestamp>_<suffix>")
     path = cfg.storage_dir / "runs" / job_id / "report.json"
     if not path.is_file():
-        raise ValueError(f"Training job report not found: {path}")
+        raise ValueError(f"{title} job report not found: {path}")
     report = json.loads(path.read_text())
-    if report.get("job_id") != job_id or report.get("command") != "train":
-        raise ValueError("Training job report does not match the requested job")
+    if report.get("job_id") != job_id or report.get("command") != command:
+        raise ValueError(f"{title} job report does not match the requested job")
     run_id = report.get("run_id")
     if run_id is None:
         raise ValueError(
             f"Job {job_id} has no MLflow run or checkpoint; inspect its error report, "
-            "fix initialization, and start a new training job"
+            f"fix initialization, and start a new {title.lower()} job"
         )
     if not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id):
-        raise ValueError("Invalid MLflow ID in the training job report")
+        raise ValueError(f"Invalid MLflow ID in the {title.lower()} job report")
     run = client.get_run(run_id)
-    if run.data.tags.get("vloop.kind") != "train" or run.data.tags.get("vloop.job_id") != job_id:
+    if run.data.tags.get("vloop.kind") != command or run.data.tags.get("vloop.job_id") != job_id:
         raise ValueError("The recorded MLflow run belongs to a different vloop job")
     return run_id
 

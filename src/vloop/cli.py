@@ -95,6 +95,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--resume", metavar="JOB_ID", help="Resume a recorded vloop training job"
     )
     train.add_argument("--notes", help="Experiment purpose or observations recorded in MLflow")
+    evaluate = commands.add_parser("evaluate", help="Evaluate a training job on fixed release data")
+    selection = evaluate.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--job-id", help="Source vloop training job ID")
+    selection.add_argument("--view", metavar="JOB_ID", help="Open a completed evaluation job")
+    evaluate.add_argument(
+        "--dataset-version", help="Evaluation release (default: training release)"
+    )
+    evaluate.add_argument(
+        "--split", choices=["val", "test"], help="Default: val; test requires this option"
+    )
+    evaluate.add_argument("--limit", type=int, help="Evaluate only the first N images by image ID")
+    evaluate.add_argument("--confidence", type=float, help="Override the saved inference threshold")
+    evaluate.add_argument(
+        "--display-confidence", type=float, help="Override the saved display threshold"
+    )
+    evaluate.add_argument("--max-detections", type=int, help="Maximum predictions per image")
+    evaluate.add_argument("--notes", help="Evaluation purpose or observations recorded in MLflow")
+    evaluate.add_argument(
+        "--no-browser", action="store_true", help="Serve --view without opening a browser"
+    )
     experiments = commands.add_parser("experiments", help="Serve the local MLflow experiment UI")
     experiments.add_argument("--no-browser", action="store_true", help="Do not open a browser")
     for command in (
@@ -107,10 +127,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         release,
         restore,
         train,
+        evaluate,
         experiments,
     ):
         command.add_argument("--config", default=argparse.SUPPRESS, help="Path to project YAML")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.command == "evaluate":
+        if args.view and any(
+            getattr(args, name) is not None
+            for name in (
+                "dataset_version",
+                "split",
+                "limit",
+                "confidence",
+                "display_confidence",
+                "max_detections",
+                "notes",
+            )
+        ):
+            parser.error("--view uses saved evaluation settings; omit inference options")
+        if args.no_browser and not args.view:
+            parser.error("--no-browser requires --view")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -121,6 +159,10 @@ def main(argv: list[str] | None = None) -> int:
             from .tracking import experiments
 
             return experiments(cfg, no_browser=args.no_browser)
+        if args.command == "evaluate" and args.view:
+            from .evaluate import view_evaluation
+
+            return view_evaluation(cfg, args.view, no_browser=args.no_browser)
         if args.command == "doctor":
             from .doctor import doctor
 
@@ -169,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             from .release import restore
 
             report = restore(cfg, version=args.version)
-        else:
+        elif args.command == "train":
             from .train import train
 
             report = train(
@@ -177,6 +219,20 @@ def main(argv: list[str] | None = None) -> int:
                 dataset_version=args.dataset_version,
                 resume=args.resume,
                 notes=args.notes,
+            )
+        else:
+            from .evaluate import evaluate
+
+            report = evaluate(
+                cfg,
+                job_id=args.job_id,
+                dataset_version=args.dataset_version,
+                split=args.split,
+                limit=args.limit,
+                notes=args.notes,
+                confidence=args.confidence,
+                display_confidence=args.display_confidence,
+                max_detections=args.max_detections,
             )
     except (OSError, ValueError, RuntimeError, yaml.YAMLError) as exc:
         print(f"vloop: {exc}", file=sys.stderr)
@@ -226,6 +282,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Best validation mask mAP: {report['best_mask_map']:.6f}")
         if report.get("model_dir"):
             print(f"Model: {report['model_dir']}")
+    elif args.command == "evaluate":
+        print(f"Source training job: {report['source_job_id']}")
+        print(
+            f"Split: {report['split']}, images: {report.get('images', 0)}, "
+            f"predicted: {report['predicted']}"
+        )
+        for kind, values in report.get("metrics", {}).items():
+            print(
+                f"{kind}: mAP={values['mAP']}, AP50={values['AP50']}, "
+                f"FP={values['fp']}, FN={values['fn']}"
+            )
+        if report["status"] == "completed":
+            print(f"Comparison ID: {report['comparison_id']}")
+            print(f"View: vloop evaluate --config {cfg.config_path} --view {report['job_id']}")
     else:
         for split, counts in report.get("summary", {}).get("splits", {}).items():
             print(

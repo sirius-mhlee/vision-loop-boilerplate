@@ -22,9 +22,7 @@ class ForegroundPostProcess(PostProcess):
         return super()._select_topk(out_logits[..., : self.num_classes])
 
 
-def load_model(cfg, job_id, *, device=None):
-    from rfdetr import RFDETR
-
+def read_model_metadata(cfg, job_id):
     client = client_for(cfg)
     run_id = run_id_for_job(client, cfg, job_id)
     destination = cfg.storage_dir / "models/mlflow" / run_id
@@ -33,6 +31,16 @@ def load_model(cfg, job_id, *, device=None):
     metadata = json.loads(Path(metadata_path).read_text())
     if metadata["schema_version"] != 1 or metadata["weights"] != "best.pt":
         raise ValueError("Unsupported model artifact format")
+    return metadata, Path(metadata_path)
+
+
+def load_model(cfg, job_id, *, device=None):
+    from rfdetr import RFDETR
+
+    metadata, metadata_path = read_model_metadata(cfg, job_id)
+    client = client_for(cfg)
+    run_id = run_id_for_job(client, cfg, job_id)
+    destination = metadata_path.parent.parent
     weights = Path(metadata_path).parent / "best.pt"
     if not weights.is_file() or sha256_file(weights) != metadata["sha256"]:
         weights = Path(client.download_artifacts(run_id, "model/best.pt", str(destination)))
