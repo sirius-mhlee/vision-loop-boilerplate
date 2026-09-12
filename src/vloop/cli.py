@@ -57,7 +57,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--min-confidence", type=float, help="Minimum confidence of every predicted object"
     )
     batch.add_argument(
-        "--sample-rate", type=float, help="Fraction held out for manual review (default: 0.01)"
+        "--sample-rate",
+        type=float,
+        help="Sample all eligible images/groups before confidence checks (default: 0.01)",
     )
     batch.add_argument("--actor", help="Person choosing the automatic adoption policy")
     batch.add_argument("--limit", type=int, help="Bound the new preview's input count")
@@ -80,6 +82,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--include-auto-accepted",
         action="store_true",
         help="Explicitly include automatically accepted labels in train only",
+    )
+    release.add_argument(
+        "--manual-to-val-test",
+        action="store_true",
+        default=None,
+        help="Assign new manual groups to val/test; set on the first release, inherited later",
     )
     release.add_argument(
         "--prepare-only",
@@ -205,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
                 version=args.version,
                 resume=args.resume,
                 include_auto_train=args.include_auto_accepted,
+                manual_to_val_test=args.manual_to_val_test,
                 prepare_only=args.prepare_only,
             )
         elif args.command == "restore":

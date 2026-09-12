@@ -13,7 +13,14 @@ from PIL import Image
 
 from vloop.approval import annotation_content, content_hash, record_path
 from vloop.config import ClassConfig
-from vloop.release_data import capture, connect, export_coco, initial_split, validate_coco
+from vloop.release_data import (
+    capture,
+    connect,
+    export_coco,
+    initial_split,
+    manual_eval_split,
+    validate_coco,
+)
 from vloop.release_dvc import git, image_relative, restore_data
 from vloop.runtime import sha256_file, write_json
 
@@ -167,8 +174,146 @@ def test_automatic_is_opt_in_and_first_release_group_stays_together(release_proj
         assert {r[0] for r in db.execute("SELECT split FROM records")} == {"train"}
 
 
+def test_manual_eval_groups_conflicts_and_historical_train_are_preserved(release_project, tmp_path):
+    cfg = replace(release_project, release_group_field="scene")
+    names = {
+        split: next(
+            str(i) for i in range(1000) if manual_eval_split("group:" + str(i), cfg) == split
+        )
+        for split in ("val", "test")
+    }
+    auto = make_sample(cfg, 1, automatic=True, group="training")
+    val = make_sample(cfg, 2, group=names["val"])
+    test = make_sample(cfg, 3, group=names["test"])
+    mixed = [
+        make_sample(cfg, 4, group="mixed"),
+        make_sample(cfg, 5, automatic=True, group="mixed"),
+    ]
+    first = tmp_path / "first/metadata/snapshot.sqlite3"
+    capture(cfg, [auto, val, test, *mixed], first, include_auto=True, manual_to_val_test=True)
+    summary = export_coco(cfg, first, first.parent.parent, manual_to_val_test=True)
+    validate_coco(cfg, first, first.parent.parent)
+    assert summary["held_reasons"] == {"mixed_approval_group": 2}
+    assert summary["splits"]["train"]["automatic"] == 1
+    assert summary["splits"]["train"]["manual"] == 0
+    assert summary["splits"]["val"]["manual"] == summary["splits"]["test"]["manual"] == 1
+    with closing(connect(first)) as db:
+        original = {r["image_id"]: tuple(r) for r in db.execute("SELECT * FROM ledger")}
+        assert (
+            db.execute("SELECT COUNT(*) FROM groups WHERE group_key='group:mixed'").fetchone()[0]
+            == 0
+        )
+
+    # Corrected training data and new members of its scene never move into evaluation.
+    auto["ground_truth"].detections[0].mask[0, 0] = True
+    approve(cfg, auto)
+    same_train = make_sample(cfg, 6, group="training")
+    held = make_sample(cfg, 7, group=names["val"])
+    new_group = [make_sample(cfg, i, group="new-eval") for i in (8, 9)]
+    # Resolve the mixed group by reviewing its automatic member; no split was reserved.
+    approve(cfg, mixed[1])
+    second = tmp_path / "second/metadata/snapshot.sqlite3"
+    capture(
+        cfg,
+        [auto, val, *mixed, same_train, held, *new_group],
+        second,
+        parent=first,
+        include_auto=True,
+        manual_to_val_test=True,
+    )
+    updated = export_coco(cfg, second, second.parent.parent, manual_to_val_test=True)
+    assert updated["held_reasons"] == {"new_image_in_heldout_group": 1}
+    assert updated["splits"]["train"]["manual"] == 2
+    with closing(connect(second)) as db:
+        ledger = {r["image_id"]: tuple(r) for r in db.execute("SELECT * FROM ledger")}
+        assert all(ledger[key] == value for key, value in original.items())
+        assert ledger[auto["image_id"]][2] == ledger[same_train["image_id"]][2] == "train"
+        assert ledger[new_group[0]["image_id"]][2] == ledger[new_group[1]["image_id"]][2]
+        assert ledger[new_group[0]["image_id"]][2] in ("val", "test")
+        assert all(ledger[s["image_id"]][2] in ("val", "test") for s in mixed)
+
+    third = tmp_path / "third.sqlite3"
+    capture(cfg, [test], third, parent=second, manual_to_val_test=True)
+    with closing(connect(third)) as db:
+        assert (
+            tuple(
+                db.execute("SELECT * FROM ledger WHERE image_id=?", (test["image_id"],)).fetchone()
+            )
+            == original[test["image_id"]]
+        )
+    approve(cfg, test, automatic=True)
+    with pytest.raises(ValueError, match="needs manual approval"):
+        capture(
+            cfg,
+            [test],
+            tmp_path / "invalid.sqlite3",
+            parent=third,
+            include_auto=True,
+            manual_to_val_test=True,
+        )
+    # Moving a historical image to a conflicting group must not hide the group change.
+    test["scene"] = "changed-scene"
+    extra = make_sample(cfg, 10, group="changed-scene")
+    with pytest.raises(ValueError, match="Group changed"):
+        capture(
+            cfg,
+            [test, extra],
+            tmp_path / "changed.sqlite3",
+            parent=third,
+            include_auto=True,
+            manual_to_val_test=True,
+        )
+
+
+def test_all_conflicting_groups_can_be_previewed_but_not_published(release_project, monkeypatch):
+    import vloop.release as module
+
+    cfg = replace(release_project, release_group_field="scene")
+    samples = [
+        make_sample(cfg, 1, group="mixed"),
+        make_sample(cfg, 2, group="mixed", automatic=True),
+    ]
+    monkeypatch.setattr(module, "find_spec", lambda name: True)
+    monkeypatch.setattr(module, "project_repo", lambda cfg: cfg.config_path.parent)
+    monkeypatch.setattr(module, "versions", lambda root: [])
+    monkeypatch.setattr(module, "git", lambda *args: "test-commit")
+    monkeypatch.setattr(module, "_samples", lambda cfg, **kwargs: iter(samples))
+    preview = module.release(
+        cfg, version="v001", include_auto_train=True, manual_to_val_test=True, prepare_only=True
+    )
+    assert preview["status"] == "ready", preview
+    assert preview["summary"]["held_reasons"] == {"mixed_approval_group": 2}
+    assert sum(s["images"] for s in preview["summary"]["splits"].values()) == 0
+    result = module.release(cfg, resume=preview["job_id"])
+    assert result["status"] == "failed" and "All images are held" in result["error"]
+
+
+def test_manual_eval_hash_is_independent_of_sampling_and_respects_val_test_ratio(project):
+    from collections import Counter
+
+    from vloop.review_batch import policy_decision
+
+    def selected_splits(cfg):
+        return Counter(
+            manual_eval_split(f"group:{i}", cfg)
+            for i in range(10000)
+            if policy_decision(f"group:{i}", [], minimum=0.9, sample_rate=0.2, seed=cfg.seed)
+            == "sample"
+        )
+
+    balanced = selected_splits(project)
+    assert 850 < balanced["val"] < 1150 and 850 < balanced["test"] < 1150
+    skewed = selected_splits(replace(project, split_ratios=(0.6, 0.3, 0.1)))
+    assert 0.70 < skewed["val"] / sum(skewed.values()) < 0.80
+    with pytest.raises(ValueError, match="positive val/test"):
+        manual_eval_split("x", replace(project, split_ratios=(1, 0, 0)))
+
+
 @pytest.mark.skipif(os.environ.get("VLOOP_TEST_RELEASE") != "1", reason="Requires DVC and RF-DETR")
-def test_real_dvc_git_restore_resume_and_rfdetr(release_project, tmp_path, monkeypatch):
+@pytest.mark.parametrize("manual_to_val_test", [False, True])
+def test_real_dvc_git_restore_resume_and_rfdetr(
+    release_project, tmp_path, monkeypatch, manual_to_val_test
+):
     from rfdetr.datasets.coco import CocoDetection
 
     import vloop.release as module
@@ -193,14 +338,25 @@ def test_real_dvc_git_restore_resume_and_rfdetr(release_project, tmp_path, monke
     git(root, "add", "code.py")
     (root / "code.py").write_text("unstaged edit\n")
     before = git(root, "diff", "--cached"), git(root, "diff")
-    samples = [make_sample(cfg, i + 1, empty=i == 1) for i in range(5)]
+    samples = [
+        make_sample(cfg, i + 1, empty=i == 1, automatic=manual_to_val_test and i == 0)
+        for i in range(5)
+    ]
     monkeypatch.setattr(module, "_samples", lambda cfg, **kwargs: iter(samples))
-    prepared = module.release(cfg, version="v001", prepare_only=True)
+    prepared = module.release(
+        cfg,
+        version="v001",
+        prepare_only=True,
+        include_auto_train=manual_to_val_test,
+        manual_to_val_test=manual_to_val_test,
+    )
     assert prepared["status"] == "ready", prepared
     assert prepared["storage_plan"]["new_images"] == 5
     assert not cfg.dvc_remote.exists()
     assert not (cfg.storage_dir / "releases/pool").exists()
     assert git(root, "tag", "--list", "dataset/v001") == ""
+    with pytest.raises(ValueError, match="frozen"):
+        module.release(cfg, resume=prepared["job_id"], manual_to_val_test=True)
     first = module.release(cfg, resume=prepared["job_id"])
     assert first["status"] == "completed", first
     assert git(root, "rev-parse", "HEAD") == head
@@ -213,6 +369,13 @@ def test_real_dvc_git_restore_resume_and_rfdetr(release_project, tmp_path, monke
     with pytest.raises(ValueError, match="cannot be overwritten"):
         module.release(cfg, version="v001")
     data_root, info = restore_data(cfg, "v001")
+    assert info["manual_to_val_test"] == manual_to_val_test
+    assert info["summary"]["manual_to_val_test"] == manual_to_val_test
+    if manual_to_val_test:
+        assert info["summary"]["splits"]["train"]["manual"] == 0
+    else:
+        with pytest.raises(ValueError, match="first release"):
+            module.release(cfg, version="v002", manual_to_val_test=True)
     expected = {s["image_id"]: s for s in samples}
     for folder in ("train", "valid", "test"):
         dataset = CocoDetection(
@@ -252,8 +415,13 @@ def test_real_dvc_git_restore_resume_and_rfdetr(release_project, tmp_path, monke
         raise RuntimeError("upload response interrupted")
 
     monkeypatch.setattr(module, "add_and_push", interrupt_after_upload)
+    if manual_to_val_test:
+        approve(cfg, samples[0])  # A re-reviewed training image stays in train.
     failed = module.release(cfg, version="v002")
     assert failed["status"] == "failed", failed
+    assert failed["summary"]["manual_to_val_test"] == manual_to_val_test
+    if manual_to_val_test:
+        assert failed["summary"]["splits"]["train"]["manual"] == 1
     assert git(root, "tag", "--list", "dataset/v002") == ""
     monkeypatch.setattr(module, "add_and_push", original_push)
     import subprocess
@@ -283,6 +451,7 @@ def test_real_dvc_git_restore_resume_and_rfdetr(release_project, tmp_path, monke
     resumed = json.loads((Path(failed["result_dir"]) / "report.json").read_text())
     assert resumed["status"] == "completed", resumed
     assert resumed["storage"]["new_image_bytes"] == 0
+    assert restore_data(cfg, "v002")[1]["manual_to_val_test"] == manual_to_val_test
     assert git(root, "rev-parse", "HEAD") == head
     assert before == (git(root, "diff", "--cached"), git(root, "diff"))
     # Mutable review files cannot change an old release's bytes.

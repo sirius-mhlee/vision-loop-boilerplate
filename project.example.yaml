@@ -45,12 +45,13 @@ train_num_workers: 0
 train_gradient_checkpointing: false
 
 # Release / Evaluation
-# These ratios split manually approved groups on the first release.
-# Automatically accepted groups are train-only, so sample-rate 0.2 does NOT
-# imply that the final dataset will contain 80% train / 10% val / 10% test.
+# Default: split manual groups by all three ratios on the first release.
+# With release --manual-to-val-test: new manual groups use only val:test (here 1:1).
+# Auto-accepted groups stay train-only; actual totals depend on sampling and approval.
 split_ratios: [0.8, 0.1, 0.1]
 # Optional FiftyOne string field identifying a capture/scene group.
-# null treats each image as its own group; supply group metadata before the first release.
+# Also selects review-batch samples by group, before confidence/empty checks.
+# null treats each image as its own group; fill metadata before the first review-batch/release.
 release_group_field: null
 # Final test evaluation still requires explicit --split test.
 eval_split: val

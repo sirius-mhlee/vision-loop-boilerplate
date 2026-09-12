@@ -1,11 +1,12 @@
 import math
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
 from vloop.cli import parse_args
 from vloop.review import change_reviews
-from vloop.review_batch import policy_decision, review_batch
+from vloop.review_batch import policy_decision, review_batch, sampling_key
 from vloop.review_store import connect_records, read_record, save_record
 
 
@@ -34,6 +35,31 @@ def test_sampling_is_repeatable_and_does_not_depend_on_batch_order():
     assert 50 < list(forward.values()).count("sample") < 150
     assert any(choose(str(i), seed=43) != forward[str(i)] for i in range(10000))
     assert policy_decision("x", [1.0], minimum=0.9, sample_rate=1, seed=42) == "sample"
+
+
+def test_sampling_precedes_quality_checks_for_the_entire_candidate_set():
+    selected = []
+    for i in range(1000):
+        decisions = [
+            policy_decision(str(i), scores, minimum=0.9, sample_rate=0.2, seed=42)
+            for scores in ([0.99], [0.2], [])
+        ]
+        assert decisions in (["sample"] * 3, ["accept", "low_confidence", "empty"])
+        if decisions[0] == "sample":
+            selected.append(i)
+    assert 150 < len(selected) < 250
+    for scores in ([], [0.1], [None]):
+        assert policy_decision("x", scores, minimum=0.9, sample_rate=1, seed=42) == "sample"
+
+
+def test_sampling_uses_the_configured_scene_group(project):
+    first = {"image_id": "a", "scene": "shared"}
+    second = {"image_id": "b", "scene": "shared"}
+    assert sampling_key(project, first) != sampling_key(project, second)
+    grouped = replace(project, release_group_field="scene")
+    assert sampling_key(grouped, first) == sampling_key(grouped, second) == "group:shared"
+    with pytest.raises(ValueError, match="group field"):
+        sampling_key(grouped, {"image_id": "a", "scene": ""})
 
 
 @pytest.mark.parametrize(

@@ -30,6 +30,10 @@ def _implementation():
 
 
 def policy_decision(image_id, confidences, *, minimum, sample_rate, seed):
+    # Use a separate hash domain from release split assignment, including for groups.
+    value = int(hashlib.sha256(f"review-sample-v2:{seed}:{image_id}".encode()).hexdigest()[:16], 16)
+    if value / 2**64 < sample_rate:
+        return "sample"
     if not confidences:
         return "empty"
     if any(
@@ -37,8 +41,16 @@ def policy_decision(image_id, confidences, *, minimum, sample_rate, seed):
         for value in confidences
     ):
         return "low_confidence"
-    value = int(hashlib.sha256(f"{seed}:{image_id}".encode()).hexdigest()[:16], 16)
-    return "sample" if value / 2**64 < sample_rate else "accept"
+    return "accept"
+
+
+def sampling_key(cfg, sample):
+    if cfg.release_group_field:
+        group = sample[cfg.release_group_field]
+        if not isinstance(group, str) or not group.strip():
+            raise ValueError("Configured group field must be a nonempty string")
+        return "group:" + group
+    return "image:" + sample["image_id"]
 
 
 def _connect(path):
@@ -151,7 +163,7 @@ def _inspect(cfg, dataset, row, policy):
     ):
         return sample, None, None, "preserve", "Ground truth differs from the original prediction"
     decision = policy_decision(
-        row["image_id"],
+        sampling_key(cfg, sample),
         [item.get("confidence") for item in prediction["instances"]],
         minimum=policy["minimum"],
         sample_rate=policy["sample_rate"],
@@ -358,6 +370,8 @@ def review_batch(
                         "source_job_id": job_id,
                         "minimum": minimum,
                         "sample_rate": sample_rate,
+                        "sampling_method": "sha256_all_candidates_v2",
+                        "sample_group_field": cfg.release_group_field,
                         "seed": cfg.seed,
                         "actor": actor.strip(),
                         "empty": "manual_review",

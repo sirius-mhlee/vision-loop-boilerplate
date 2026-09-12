@@ -34,12 +34,28 @@ def initial_split(key, cfg):
     return "val" if value < sum(cfg.split_ratios[:2]) else "test"
 
 
-def capture(cfg, samples, path, *, parent=None, include_auto=False):
+def manual_eval_split(key, cfg):
+    total = sum(cfg.split_ratios[1:])
+    if total <= 0:
+        raise ValueError("--manual-to-val-test requires a positive val/test ratio")
+    value = (
+        int(
+            hashlib.sha256(f"release-manual-eval-v1:{cfg.seed}:{key}".encode()).hexdigest()[:16],
+            16,
+        )
+        / 2**64
+    )
+    return "val" if value < cfg.split_ratios[1] / total else "test"
+
+
+def capture(cfg, samples, path, *, parent=None, include_auto=False, manual_to_val_test=False):
     """Publish a snapshot only after its entire approval scan succeeds.
 
     A retry of an interrupted scan takes a new snapshot; a finished snapshot is frozen.
     All large collections, including historical split assignments, stay in SQLite.
     """
+    if manual_to_val_test and sum(cfg.split_ratios[1:]) <= 0:
+        raise ValueError("--manual-to-val-test requires a positive val/test ratio")
     temporary = path.with_suffix(".partial.sqlite3")
     temporary.unlink(missing_ok=True)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,38 +130,52 @@ def capture(cfg, samples, path, *, parent=None, include_auto=False):
                 db.commit()
         if not count:
             raise ValueError("No approved images; complete review or use --include-auto-accepted")
-        # Groups containing automatic labels are train-only on the first release.
-        # A historical held-out group is never silently moved to train.
-        if parent is None:
+        # Mark historical held-out groups before assigning any new groups. This also
+        # permits multiple images in a newly assigned evaluation group on later releases.
+        db.execute(
+            "UPDATE records SET held_reason='new_image_in_heldout_group' "
+            "WHERE image_id NOT IN (SELECT image_id FROM ledger) "
+            "AND group_key IN (SELECT group_key FROM groups WHERE split!='train')"
+        )
+        if manual_to_val_test:
             db.execute(
-                "INSERT INTO groups SELECT DISTINCT group_key, 'train' FROM records "
-                "WHERE automatic=1"
+                "UPDATE records SET held_reason='mixed_approval_group' WHERE group_key IN ("
+                "SELECT group_key FROM records "
+                "WHERE group_key NOT IN (SELECT group_key FROM groups) "
+                "GROUP BY group_key HAVING MIN(automatic)!=MAX(automatic))"
+            )
+        # Automatic labels never enter evaluation. New mixed groups are held in the
+        # manual-evaluation policy; existing training groups retain their assignment.
+        if parent is None or manual_to_val_test:
+            db.execute(
+                "INSERT OR IGNORE INTO groups SELECT DISTINCT group_key, 'train' FROM records "
+                "WHERE automatic=1 AND held_reason IS NULL"
             )
         next_id = db.execute("SELECT COALESCE(MAX(coco_id), 0)+1 FROM ledger").fetchone()[0]
         for row in db.execute(
-            "SELECT image_id, group_key, automatic FROM records ORDER BY image_id"
+            "SELECT image_id, group_key, automatic, held_reason FROM records ORDER BY image_id"
         ):
             old = db.execute("SELECT * FROM ledger WHERE image_id=?", (row["image_id"],)).fetchone()
+            if old and old["group_key"] != row["group_key"]:
+                raise ValueError(f"Group changed for existing image {row['image_id']}")
+            if row["held_reason"]:
+                continue
             group = db.execute(
                 "SELECT split FROM groups WHERE group_key=?", (row["group_key"],)
             ).fetchone()
             if old:
-                if old["group_key"] != row["group_key"]:
-                    raise ValueError(f"Group changed for existing image {row['image_id']}")
                 split, coco_id = old["split"], old["coco_id"]
                 if row["automatic"] and split != "train":
                     raise ValueError("An existing val/test image needs manual approval")
-            elif parent and group and group[0] != "train":
-                db.execute(
-                    "UPDATE records SET held_reason='new_image_in_heldout_group' WHERE image_id=?",
-                    (row["image_id"],),
-                )
-                continue
             else:
                 split = (
                     group[0]
                     if group
-                    else ("train" if parent else initial_split(row["group_key"], cfg))
+                    else (
+                        manual_eval_split(row["group_key"], cfg)
+                        if manual_to_val_test
+                        else ("train" if parent else initial_split(row["group_key"], cfg))
+                    )
                 )
                 coco_id, next_id = next_id, next_id + 1
                 db.execute(
@@ -158,8 +188,6 @@ def capture(cfg, samples, path, *, parent=None, include_auto=False):
                 (split, coco_id, row["image_id"]),
             )
         db.commit()
-        if not db.execute("SELECT 1 FROM records WHERE split IS NOT NULL LIMIT 1").fetchone():
-            raise ValueError("All new images belong to held-out groups; no releasable images")
     write_json(path.with_suffix(".seal.json"), {"sha256": sha256_file(temporary)})
     temporary.replace(path)
 
@@ -180,7 +208,7 @@ def _array(handle, values):
     handle.write("]")
 
 
-def export_coco(cfg, snapshot, root):
+def export_coco(cfg, snapshot, root, *, manual_to_val_test=False):
     classes = [
         {"id": c.id, "name": c.name, "supercategory": "object"}
         for c in sorted(cfg.classes, key=lambda c: c.id)
@@ -192,12 +220,21 @@ def export_coco(cfg, snapshot, root):
         "group_field": cfg.release_group_field,
         "seed": cfg.seed,
         "split_ratios": list(cfg.split_ratios),
-        "split_method": "sha256_group_threshold_v1",
+        "manual_to_val_test": manual_to_val_test,
+        "split_method": (
+            "sha256_manual_eval_group_v1" if manual_to_val_test else "sha256_group_threshold_v1"
+        ),
     }
     with closing(connect(snapshot)) as db:
         summary["held"] = db.execute("SELECT COUNT(*) FROM records WHERE split IS NULL").fetchone()[
             0
         ]
+        summary["held_reasons"] = dict(
+            db.execute(
+                "SELECT held_reason, COUNT(*) FROM records WHERE held_reason IS NOT NULL "
+                "GROUP BY held_reason"
+            )
+        )
         for split, folder in SPLITS.items():
             directory = root / folder
             directory.mkdir(parents=True, exist_ok=True)

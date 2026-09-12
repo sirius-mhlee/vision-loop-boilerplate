@@ -57,7 +57,17 @@ def run(path):
             )
         # A CLI process must select the project DB before its first FiftyOne import.
         process = subprocess.run(
-            [sys.executable, "-m", "vloop", "release", "--config", str(path), "--version", "v001"],
+            [
+                sys.executable,
+                "-m",
+                "vloop",
+                "release",
+                "--config",
+                str(path),
+                "--version",
+                "v001",
+                "--manual-to-val-test",
+            ],
             cwd=root,
             env={
                 key: value
@@ -73,6 +83,8 @@ def run(path):
         assert len(reports) == 1
         report = json.loads(reports[0].read_text())
         assert report["status"] == "completed", report
+        assert report["summary"]["manual_to_val_test"] is True
+        assert report["summary"]["splits"]["train"]["images"] == 0
         restored = restore(cfg, version="v001")
         assert restored["status"] == "completed", restored
         assert sum(s["images"] for s in report["summary"]["splits"].values()) == 3

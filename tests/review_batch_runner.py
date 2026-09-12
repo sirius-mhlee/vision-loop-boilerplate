@@ -24,7 +24,7 @@ from vloop.review import (
     prepare_review,
 )
 from vloop.review_audit import review_audit
-from vloop.review_batch import _apply_one, _inspect, review_batch
+from vloop.review_batch import _apply_one, _inspect, policy_decision, review_batch
 from vloop.runtime import sha256_file, write_json
 
 
@@ -69,6 +69,44 @@ def run(path):
         checksums[sample["image_id"]] = sha256_file(result)
         store.put(prediction, checksums[sample["image_id"]])
     ensure_review_schema(dataset, cfg)
+    import fiftyone as fo
+
+    dataset.add_sample_field("scene", fo.StringField)
+    selected_group = next(
+        str(i)
+        for i in range(1000)
+        if policy_decision(f"group:{i}", [], minimum=0.9, sample_rate=0.2, seed=cfg.seed)
+        == "sample"
+    )
+    other_group = next(
+        str(i)
+        for i in range(1000)
+        if policy_decision(f"group:{i}", [], minimum=0.9, sample_rate=0.2, seed=cfg.seed)
+        != "sample"
+    )
+    for index, sample_id in enumerate(ids):
+        sample = dataset[sample_id]
+        sample["scene"] = selected_group if index < 3 else other_group
+        sample.save()
+    grouped = review_batch(
+        replace(cfg, release_group_field="scene"),
+        job_id=job,
+        minimum=0.9,
+        sample_rate=0.2,
+        actor="group-test",
+    )
+    assert grouped["status"] == "ready", grouped
+    assert grouped["policy"]["sample_group_field"] == "scene"
+    assert grouped["decisions"]["sample"] == 3  # High, low and empty predictions together.
+    assert grouped["decisions"]["accept"] == 8
+    with sqlite3.connect(Path(grouped["result_dir"]) / "samples.sqlite3") as connection:
+        assert all(
+            connection.execute("SELECT decision FROM inputs WHERE sample_id=?", (sid,)).fetchone()[
+                0
+            ]
+            == "sample"
+            for sid in ids[:3]
+        )
     manual = dataset[ids[3]]
     manual["ground_truth"] = manual[field].copy()
     manual.save()
