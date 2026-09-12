@@ -309,6 +309,72 @@ def test_manual_eval_hash_is_independent_of_sampling_and_respects_val_test_ratio
         manual_eval_split("x", replace(project, split_ratios=(1, 0, 0)))
 
 
+@pytest.mark.parametrize("include_auto", [False, True])
+@pytest.mark.parametrize("manual_to_val_test", [False, True])
+def test_each_release_can_choose_any_policy_without_reassigning_history(
+    release_project, tmp_path, include_auto, manual_to_val_test
+):
+    cfg = replace(release_project, release_group_field="scene")
+    names = {
+        split: next(str(i) for i in range(1000) if initial_split("group:" + str(i), cfg) == split)
+        for split in ("train", "val", "test")
+    }
+    old_train = make_sample(cfg, 1, group="old-train", automatic=True)
+    old_eval = make_sample(cfg, 2, group=names["val"])
+    first = tmp_path / "first.sqlite3"
+    capture(
+        cfg,
+        [old_train, old_eval],
+        first,
+        include_auto=True,
+        manual_to_val_test=not manual_to_val_test,
+    )
+    with closing(connect(first)) as db:
+        original = {r["image_id"]: tuple(r) for r in db.execute("SELECT * FROM ledger")}
+    approve(cfg, old_train)  # Human corrections stay in their historical train split.
+    # All three default splits are represented by new manual groups, even after v001.
+    new_names = {
+        split: next(
+            f"new-{i}" for i in range(1000) if initial_split(f"group:new-{i}", cfg) == split
+        )
+        for split in ("train", "val", "test")
+    }
+    manual = [make_sample(cfg, i + 3, group=new_names[s]) for i, s in enumerate(new_names)]
+    same_group = make_sample(cfg, 6, group=new_names["val"])
+    # Give the mixed group an evaluation hash so an automatic label cannot slip into val/test.
+    automatic = make_sample(cfg, 7, group=names["test"], automatic=True)
+    mixed_manual = make_sample(cfg, 8, group=names["test"])
+    held = make_sample(cfg, 9, group=names["val"])
+    second = tmp_path / "second.sqlite3"
+    capture(
+        cfg,
+        [old_train, old_eval, *manual, same_group, mixed_manual, automatic, held],
+        second,
+        parent=first,
+        include_auto=include_auto,
+        manual_to_val_test=manual_to_val_test,
+    )
+    with closing(connect(second)) as db:
+        ledger = {r["image_id"]: tuple(r) for r in db.execute("SELECT * FROM ledger")}
+        rows = {r["image_id"]: r for r in db.execute("SELECT * FROM records")}
+        assert all(ledger[key] == value for key, value in original.items())
+        assert rows[old_train["image_id"]]["split"] == "train"
+        assert rows[held["image_id"]]["held_reason"] == "new_image_in_heldout_group"
+        choose = manual_eval_split if manual_to_val_test else initial_split
+        for sample in [*manual, same_group]:
+            assert rows[sample["image_id"]]["split"] == choose("group:" + sample["scene"], cfg)
+        if not include_auto:
+            assert automatic["image_id"] not in rows
+            assert rows[mixed_manual["image_id"]]["split"] == choose("group:" + names["test"], cfg)
+        elif manual_to_val_test:
+            assert all(
+                rows[s["image_id"]]["held_reason"] == "mixed_approval_group"
+                for s in (automatic, mixed_manual)
+            )
+        else:
+            assert all(rows[s["image_id"]]["split"] == "train" for s in (automatic, mixed_manual))
+
+
 @pytest.mark.skipif(os.environ.get("VLOOP_TEST_RELEASE") != "1", reason="Requires DVC and RF-DETR")
 @pytest.mark.parametrize("manual_to_val_test", [False, True])
 def test_real_dvc_git_restore_resume_and_rfdetr(
@@ -373,9 +439,6 @@ def test_real_dvc_git_restore_resume_and_rfdetr(
     assert info["summary"]["manual_to_val_test"] == manual_to_val_test
     if manual_to_val_test:
         assert info["summary"]["splits"]["train"]["manual"] == 0
-    else:
-        with pytest.raises(ValueError, match="first release"):
-            module.release(cfg, version="v002", manual_to_val_test=True)
     expected = {s["image_id"]: s for s in samples}
     for folder in ("train", "valid", "test"):
         dataset = CocoDetection(
@@ -417,9 +480,10 @@ def test_real_dvc_git_restore_resume_and_rfdetr(
     monkeypatch.setattr(module, "add_and_push", interrupt_after_upload)
     if manual_to_val_test:
         approve(cfg, samples[0])  # A re-reviewed training image stays in train.
-    failed = module.release(cfg, version="v002")
+    second_options = {} if manual_to_val_test else {"manual_to_val_test": True}
+    failed = module.release(cfg, version="v002", **second_options)
     assert failed["status"] == "failed", failed
-    assert failed["summary"]["manual_to_val_test"] == manual_to_val_test
+    assert failed["summary"]["manual_to_val_test"] == (not manual_to_val_test)
     if manual_to_val_test:
         assert failed["summary"]["splits"]["train"]["manual"] == 1
     assert git(root, "tag", "--list", "dataset/v002") == ""
@@ -429,8 +493,9 @@ def test_real_dvc_git_restore_resume_and_rfdetr(
 
     import yaml
 
+    current = replace(cfg, seed=123, split_ratios=(0.6, 0.3, 0.1))
     cfg.config_path.write_text(
-        yaml.safe_dump({k: v for k, v in cfg.to_dict().items() if k != "config_path"})
+        yaml.safe_dump({k: v for k, v in current.to_dict().items() if k != "config_path"})
     )
     process = subprocess.run(
         [
@@ -451,7 +516,9 @@ def test_real_dvc_git_restore_resume_and_rfdetr(
     resumed = json.loads((Path(failed["result_dir"]) / "report.json").read_text())
     assert resumed["status"] == "completed", resumed
     assert resumed["storage"]["new_image_bytes"] == 0
-    assert restore_data(cfg, "v002")[1]["manual_to_val_test"] == manual_to_val_test
+    assert restore_data(cfg, "v002")[1]["manual_to_val_test"] == (not manual_to_val_test)
+    assert resumed["summary"]["seed"] == cfg.seed
+    assert resumed["summary"]["split_ratios"] == list(cfg.split_ratios)
     assert git(root, "rev-parse", "HEAD") == head
     assert before == (git(root, "diff", "--cached"), git(root, "diff"))
     # Mutable review files cannot change an old release's bytes.

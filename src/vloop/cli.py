@@ -86,8 +86,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     release.add_argument(
         "--manual-to-val-test",
         action="store_true",
-        default=None,
-        help="Assign new manual groups to val/test; set on the first release, inherited later",
+        help="Assign new manual groups to val/test for this release (default: all three splits)",
     )
     release.add_argument(
         "--prepare-only",

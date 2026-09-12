@@ -61,7 +61,7 @@ def release(
     version=None,
     resume=None,
     include_auto_train=False,
-    manual_to_val_test=None,
+    manual_to_val_test=False,
     prepare_only=False,
 ):
     if find_spec("dvc") is None or find_spec("ijson") is None:
@@ -69,7 +69,7 @@ def release(
             "Install release dependencies: python -m pip install 'dvc>=3,<4' 'ijson>=3.4,<4'"
         )
     if resume:
-        if version is not None or include_auto_train or manual_to_val_test is not None:
+        if version is not None or include_auto_train or manual_to_val_test:
             raise ValueError("--resume uses the frozen version and label/split policies")
         if not re.fullmatch(r"release_\d{8}T\d{6}_[0-9a-f]{8}", resume):
             raise ValueError("Invalid release job ID")
@@ -89,13 +89,6 @@ def release(
         prior = versions(root)
         if prior and int(version[1:]) <= int(prior[-1][1:]):
             raise ValueError(f"Use a new version after {prior[-1]}; versions cannot be overwritten")
-        if prior:
-            previous_policy = descriptor(root, prior[-1]).get("manual_to_val_test", False)
-            if manual_to_val_test is not None and manual_to_val_test != previous_policy:
-                raise ValueError("--manual-to-val-test must be chosen on the first release")
-            manual_to_val_test = previous_policy
-        else:
-            manual_to_val_test = bool(manual_to_val_test)
         git(root, "var", "GIT_AUTHOR_IDENT")
         code_commit = git(root, "rev-parse", "HEAD")
         directory, report = start_run(cfg, "release")
@@ -148,15 +141,6 @@ def release(
                     or cfg.release_group_field != parent_info["summary"]["group_field"]
                 ):
                     raise ValueError("Class mapping and group field must match the parent release")
-                if info.get("manual_to_val_test", False) != parent_info.get(
-                    "manual_to_val_test", False
-                ):
-                    raise ValueError("Split policy must match the parent release")
-                if info.get("manual_to_val_test", False) and (
-                    cfg.seed != parent_info["summary"]["seed"]
-                    or list(cfg.split_ratios) != parent_info["summary"]["split_ratios"]
-                ):
-                    raise ValueError("Manual val/test seed and split ratios must match the parent")
                 parent = parent_root / "metadata/snapshot.sqlite3"
             snapshot = work / "dataset/metadata/snapshot.sqlite3"
             report["phase"] = "snapshot"

@@ -146,11 +146,10 @@ def capture(cfg, samples, path, *, parent=None, include_auto=False, manual_to_va
             )
         # Automatic labels never enter evaluation. New mixed groups are held in the
         # manual-evaluation policy; existing training groups retain their assignment.
-        if parent is None or manual_to_val_test:
-            db.execute(
-                "INSERT OR IGNORE INTO groups SELECT DISTINCT group_key, 'train' FROM records "
-                "WHERE automatic=1 AND held_reason IS NULL"
-            )
+        db.execute(
+            "INSERT OR IGNORE INTO groups SELECT DISTINCT group_key, 'train' FROM records "
+            "WHERE automatic=1 AND held_reason IS NULL"
+        )
         next_id = db.execute("SELECT COALESCE(MAX(coco_id), 0)+1 FROM ledger").fetchone()[0]
         for row in db.execute(
             "SELECT image_id, group_key, automatic, held_reason FROM records ORDER BY image_id"
@@ -174,7 +173,7 @@ def capture(cfg, samples, path, *, parent=None, include_auto=False, manual_to_va
                     else (
                         manual_eval_split(row["group_key"], cfg)
                         if manual_to_val_test
-                        else ("train" if parent else initial_split(row["group_key"], cfg))
+                        else initial_split(row["group_key"], cfg)
                     )
                 )
                 coco_id, next_id = next_id, next_id + 1

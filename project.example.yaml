@@ -45,8 +45,9 @@ train_num_workers: 0
 train_gradient_checkpointing: false
 
 # Release / Evaluation
-# Default: split manual groups by all three ratios on the first release.
+# Default: split new manual groups by all three ratios on every release.
 # With release --manual-to-val-test: new manual groups use only val:test (here 1:1).
+# Choose the flag for each new release; existing image/group assignments stay fixed.
 # Auto-accepted groups stay train-only; actual totals depend on sampling and approval.
 split_ratios: [0.8, 0.1, 0.1]
 # Optional FiftyOne string field identifying a capture/scene group.

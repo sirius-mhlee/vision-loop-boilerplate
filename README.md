@@ -14,8 +14,8 @@ RF-DETR 학습·MLflow 기록·체크포인트 재개와 저장 모델의 새 �
 공개 Penn-Fudan 사진 8장으로 `v001`·`v002` 학습과 동일 val 비교까지 실행했습니다.
 이전 [자동 통합 검증](docs/TOY.md)은 제공된 정답 마스크를 사용했습니다. 직접 사진만 받아
 SAM 3 예측을 사람이 검수하는 절차는 아래 [Penn-Fudan 직접 실습](#penn-fudan-직접-실습)에 있습니다.
-1~7단계 핵심 기능은 구현됐으며, 최종 의존성 lock·새 컴퓨터 설치 검증·대규모 실측·실제 도메인
-성능 검증은 남아 있습니다.
+1~7단계 핵심 기능은 구현됐으며, Linux/Python 3.12/CUDA 12.8 의존성을 고정했습니다.
+다른 컴퓨터의 GPU·검수 화면 검증, 대규모 실측과 실제 도메인 성능 검증은 남아 있습니다.
 
 ## Requirement
 
@@ -29,16 +29,18 @@ git clone https://github.com/sirius-mhlee/vision-loop-boilerplate.git
 cd vision-loop-boilerplate
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
-python -m pip install -e '.[dev,autolabel,pipeline]'
+python -m pip install -r requirements/bootstrap.lock
+python -m pip install --no-build-isolation --no-deps -r requirements/linux-py312-cu128.lock
+python -m pip install --no-build-isolation --no-deps -e '.[dev,autolabel,pipeline]'
 ```
 
 `autolabel` extra는 FiftyOne과 SAM 3 실행에 필요한 주변 라이브러리를 설치합니다.
 SAM 3 패키지 자체와 체크포인트는 포함하지 않으므로 아래 소스 설치 절차도 필요합니다.
-검증한 NumPy 1.26.4, OpenCV 4.11.0.86 등의 버전을 지정했습니다.
+검증한 NumPy 1.26.4, OpenCV 4.11.0.86 등의 버전을 지정했습니다. 위 lock에는 SAM 3의
+주변 의존성도 포함하며, PyTorch `2.10.0+cu128`과 torchvision `0.25.0+cu128`도 함께 설치합니다.
 
 `pipeline` extra는 FiftyOne·RF-DETR·MLflow·DVC를 설치합니다. 위 명령은 전체 실습용 의존성을
-함께 설치합니다. 자동 라벨링만 필요할 때는 `.[dev,autolabel]`로 시작하고 나중에 추가해도 됩니다.
+함께 설치합니다. 일부 extra만 선택해 설치하려면 아래처럼 lock을 `-c`로 적용합니다.
 FiftyOne은 두 extra에 같은 버전으로 선언되어 있어 함께 선택해도 중복 설치되지 않습니다.
 FiftyOne 하위 패키지 ETA 0.17과 MLflow를 같은 프로세스에서 사용하기 위해
 `importlib-metadata==7.2.1`도 고정합니다. 8 이상에서는 누락된 메타데이터 키 조회가
@@ -47,12 +49,15 @@ FiftyOne 하위 패키지 ETA 0.17과 MLflow를 같은 프로세스에서 사용
 
 ```shell
 # pipeline을 아직 설치하지 않은 환경에서만 추가
-python -m pip install -e '.[pipeline]'
+python -m pip install --no-build-isolation -c requirements/linux-py312-cu128.lock -e '.[pipeline]'
 ```
 
-`pyproject.toml`에는 검증한 주요 라이브러리 버전을 지정했습니다. 전체 전이 의존성을 고정한
-lock 파일은 아직 없으므로 새 환경에서는 하위 패키지 버전이 달라질 수 있습니다.
-각 실행의 `dependencies.json`에는 실제 설치 버전을 저장합니다.
+`pyproject.toml`은 패키지와 extra의 의존성을 선언하고, `requirements/linux-py312-cu128.lock`은
+검증 환경의 외부 패키지 285개를 정확한 버전으로 고정합니다. `bootstrap.lock`은 pip·setuptools·wheel을
+고정합니다. 전체 의존성을 먼저 설치했으므로 소스 설치의 `--no-deps`는 의존성을 다시 선택하지 않으며,
+`--no-build-isolation`은 미리 설치한 빌드 도구를 사용합니다. `-e`의 코드 수정 반영 동작은 그대로입니다.
+설치 범위·갱신 방법은 [의존성 고정 안내](requirements/README.md)에 있습니다.
+각 실행의 `dependencies.json`에도 실제 설치 버전을 계속 저장합니다.
 PyTorch wheel은 CUDA 12.8 런타임을 포함합니다. `nvidia-smi`에 표시되는 CUDA 버전과
 `torch.version.cuda`는 별개의 값입니다.
 
@@ -101,14 +106,15 @@ Python·의존성 버전, 필수 입력, 저장 경로 쓰기 가능 여부, DVC
 ```shell
 git clone https://github.com/facebookresearch/sam3.git .vloop/vendor/sam3
 git -C .vloop/vendor/sam3 checkout 660a5e9e1b8b4c02c0ad97229b88a09a6e4ff5b7
-python -m pip install -e .vloop/vendor/sam3
+python -m pip install --no-build-isolation --no-deps -e .vloop/vendor/sam3
 ```
 
 소스를 준비한 뒤 프로젝트와 SAM 3를 한 명령으로 설치할 수도 있습니다.
 이미 같은 가상환경에 해당 SAM 3 소스를 설치했다면 반복할 필요는 없습니다.
 
 ```shell
-python -m pip install -e '.[dev,autolabel]' -e .vloop/vendor/sam3
+python -m pip install --no-build-isolation -c requirements/linux-py312-cu128.lock \
+  -e '.[dev,autolabel]' -e .vloop/vendor/sam3
 ```
 
 예제 YAML의 `sam3_commit`, `sam3_source_dir`, `sam3_checkpoint`는 위 소스와 아래 가중치 경로에
@@ -138,6 +144,8 @@ sam3_precision: bfloat16
 
 ```shell
 python -m pip check
+# 위의 전체 환경과 두 소스 패키지를 설치한 경우
+python requirements/check.py
 ```
 
 ```shell
@@ -354,12 +362,13 @@ val 오류를 참고해 **train 데이터의** 누락·오탐을 재검수하거
 새 사진이 있다면 `ingest` → `autolabel` → 새 `review-batch` 미리보기·적용 → `review`를
 반복합니다. 기존 승인·편집은 보존됩니다.
 
-v001에서 선택한 `--manual-to-val-test` 정책은 v002에도 계승됩니다. 기존 train은 사람이
-수정·재승인해도 train에 남고, 새로운 수동 승인 그룹은 val/test로 들어갑니다. 평가 데이터가
-늘어도 모델끼리 비교할 때는 아래처럼 동일한 v001 val을 명시합니다.
+`--manual-to-val-test`는 릴리스마다 선택합니다. v002에서도 신규 수동 승인 그룹을 val/test에
+넣으려면 아래처럼 다시 지정합니다. 사람이 새로 라벨링한 데이터도 학습에 배분하려면 이 옵션을
+생략해 신규 수동 그룹을 train/val/test로 나눕니다. 기존 train은 사람이 수정·재승인해도 train에
+남습니다. 평가 데이터가 늘어도 모델끼리 비교할 때는 아래처럼 동일한 v001 val을 명시합니다.
 
 ```shell
-vloop release --version v002 --include-auto-accepted
+vloop release --version v002 --include-auto-accepted --manual-to-val-test
 vloop train --dataset-version v002
 
 TRAIN_V002_JOB_ID=train_...
@@ -367,8 +376,8 @@ vloop evaluate --job-id "$TRAIN_V002_JOB_ID" --dataset-version v001 --split val
 ```
 
 두 모델을 같은 v001 val로 평가해 `comparison_id`와 지표를 비교합니다. 기존 데이터의 split은
-유지되고, 후속 릴리스의 새 이미지는 기본적으로 train에 추가됩니다. test 결과는 반복 개선에
-사용하지 않고 최종 모델을 정한 뒤 명시적으로 실행합니다.
+유지되고, 새 그룹만 이번 릴리스의 정책으로 분할합니다. test 결과는 반복 개선에 사용하지 않고
+최종 모델을 정한 뒤 명시적으로 실행합니다.
 
 ```shell
 vloop evaluate --job-id "$TRAIN_V002_JOB_ID" --dataset-version v001 --split test
@@ -621,7 +630,8 @@ RF-DETR 1.8.2의 실제 COCO 로더로 저장·복원·마스크 보존을 검�
 설치하거나, 자동 라벨링 환경에 이번 릴리스에 필요한 의존성만 추가할 수 있습니다.
 
 ```shell
-python -m pip install 'dvc>=3,<4' 'ijson>=3.4,<4'
+python -m pip install --no-build-isolation -c requirements/linux-py312-cu128.lock \
+  'dvc>=3,<4' 'ijson>=3.4,<4'
 ```
 
 실제 이미지와 클래스를 설정하고 검수를 마친 뒤 실행합니다. 작은 데이터는 첫 명령으로
@@ -654,11 +664,9 @@ vloop restore --version v001
 `--prepare-only`로 준비해 둔 작업이나 저장 도중 중단된 작업에 사용합니다. 작업에 기록된
 대상 버전과 시작 당시 `project.yaml` 설정, 자동 채택 포함 여부, 수동 승인 분할 정책을 다시
 사용하므로 `--version`, `--include-auto-accepted`, `--manual-to-val-test`를 재지정하지 않습니다.
-예를 들어 `v001` 준비 시 자동 채택을 포함했다면
-그 작업을 재개할 때도 자동 채택을 train에 포함합니다. 새 `v002` 작업에 이 선택이 자동으로
-계승되지는 않으므로, 새 버전에서도 포함하려면 해당 옵션을 다시 지정합니다.
-`--manual-to-val-test`는 분할 이력의 일관성을 위해 첫 릴리스에서 선택하고 이후 버전에 계승합니다.
-자동 채택 포함 여부와 달리 버전마다 재지정할 필요가 없습니다.
+예를 들어 `v001` 준비 시 자동 채택을 포함했다면 그 작업을 재개할 때도 자동 채택을 train에
+포함합니다. 두 정책 옵션 모두 새 `v002` 작업에 자동 계승되지 않습니다. 새 버전에서도 자동
+채택을 포함하거나 신규 수동 그룹을 val/test에만 넣으려면 각각의 옵션을 다시 지정합니다.
 
 `restore --version v001`은 **이미 완성된 버전의 이미지·라벨·메타데이터를 복원하는 명령**입니다.
 `storage_dir/releases/cache`를 사용하고, 실제 사용 경로는
@@ -678,7 +686,7 @@ FiftyOne DB를 유지하고, 복원된 라벨을 FiftyOne에 등록하지 않습
 
 ### 학습 데이터 구성
 
-기본 정책의 최초 split은 `seed: 42`, 80/10/10 비율의 그룹 해시 구간으로 배정합니다. 실제 개수는
+기본 정책은 매 릴리스의 신규 수동 그룹을 `seed: 42`, 80/10/10 비율의 해시 구간으로 배정합니다. 실제 개수는
 근사 비율이며 작은 데이터나 큰 그룹은 차이가 클 수 있습니다. `release_group_field`에
 FiftyOne의 촬영/장면 문자열 필드를 지정하면 같은 그룹은 같은 split에 들어갑니다.
 기본 `null`은 이미지별 그룹입니다. 원본 경로로 장면을 자동 추정하지 않으므로 그룹이 필요하면
@@ -686,12 +694,22 @@ FiftyOne의 촬영/장면 문자열 필드를 지정하면 같은 그룹은 같�
 해당 이미지를 자동 채택하거나 릴리스하지 않습니다.
 
 이후 릴리스는 기존 이미지의 split과 COCO ID를 유지하며, 한 버전에서 빠진 이미지의 분할도
-기록해 둡니다. 기본 정책은 새 이미지를 train으로 추가하지만 기존 val/test 그룹과 겹치면 보류합니다.
-최초 자동 채택이 포함된 그룹은 통째로 train에 배정합니다. 기존 검증/테스트 그룹을 자동
-채택 때문에 train으로 옮기지 않습니다. 그룹 필드·기존 이미지의 그룹·클래스 매핑 변경은
-자동 처리하지 않습니다.
+기록해 둡니다. 같은 train 그룹의 신규 이미지는 train에 추가하고, 기존 val/test 그룹과 겹치는
+신규 이미지는 보류합니다. 기본 정책에서 자동 채택이 포함된 신규 그룹은 통째로 train에
+배정합니다. 기존 검증/테스트 그룹을 자동 채택 때문에 train으로 옮기지 않습니다.
+그룹 필드·기존 이미지의 그룹·클래스 매핑 변경은 자동 처리하지 않습니다.
 
-수동 검수분을 평가에 집중하려면 첫 릴리스에 다음 옵션을 지정합니다.
+두 옵션은 **새 릴리스마다 독립적으로 선택**합니다. 기본 비율 `[0.8, 0.1, 0.1]`일 때의 동작은
+다음과 같습니다. 배분은 처음 split을 정하는 이미지·그룹에 적용하며 기존 split은 보존합니다.
+
+| 이번 릴리스의 옵션 | 자동 채택 | 신규 수동 승인 그룹 |
+|---|---|---|
+| `--include-auto-accepted --manual-to-val-test` | train에 포함 | val:test = 1:1 |
+| `--include-auto-accepted` | train에 포함 | train:val:test = 8:1:1 |
+| 없음 | 제외 | train:val:test = 8:1:1 |
+| `--manual-to-val-test` | 제외 | val:test = 1:1 |
+
+수동 검수분을 평가에 집중하려는 릴리스에는 다음처럼 지정합니다.
 
 ```shell
 vloop release --version v001 --include-auto-accepted --manual-to-val-test --prepare-only
@@ -702,13 +720,17 @@ vloop release --version v001 --include-auto-accepted --manual-to-val-test --prep
   서로 다른 해시를 사용합니다. 전체 80/10/10을 맞추기 위해 자동 정답을 평가에 넣지는 않습니다.
 - 기존 이미지의 split·COCO ID는 항상 유지합니다. 기존 train 이미지의 라벨을 사람이 수정해도
   train에 남습니다. 같은 train 그룹의 새 이미지도 train입니다. 기존 val/test 그룹의 새 이미지는
-  계속 보류합니다. 새 수동 그룹은 v002 이후에도 val/test로 배정합니다.
+  계속 보류합니다. 이 옵션을 지정하면 v002 이후의 새 수동 그룹도 val/test로 배정합니다.
 - 자동·수동 승인이 섞인 신규 그룹은 전체를 `mixed_approval_group`으로 보류합니다. 자동 승인
   멤버까지 사람이 검수해 수동 그룹으로 만든 뒤 새 준비 작업을 만들 수 있습니다. 단순히 제외한
   멤버는 릴리스 대상이 아니며, 이후 같은 그룹으로 다시 들어오면 기존 그룹 분할 규칙을 따릅니다.
-- 분할 정책은 첫 버전에서 선택하고 이후 변경하지 않습니다. 이 모드에서는 `seed`, `split_ratios`도
-  첫 버전과 같아야 합니다. 이미 기본 정책으로 발행한 데이터 이력에 이 옵션을 뒤늦게 추가하면
-  오류입니다. 발행 전 미리보기만 있다면 원하는 정책으로 새 준비 작업을 만들 수 있습니다.
+- `--manual-to-val-test`를 생략하면 신규 수동 그룹은 `split_ratios` 전체 비율로 배분합니다.
+  자동 채택을 포함한 신규 혼합 그룹은 그룹을 나누지 않고 통째로 train에 배정합니다.
+  위 표의 비율은 수동 승인만으로 구성된 신규 그룹에 적용합니다.
+- 이전 버전에서 사용한 옵션을 다음 버전에서 빼거나, 나중에 추가할 수 있습니다. `seed`,
+  `split_ratios` 변경도 새 그룹 배정에만 적용합니다. 이미 배정된 val/test를 다시 8:1:1로
+  섞거나, 수동 재승인한 기존 train을 평가로 이동하지 않습니다. 준비 후 선택을 바꾸려면
+  같은 미발행 버전으로 새 준비 작업을 만들고, 같은 작업의 `--resume`은 저장한 정책을 사용합니다.
 - val/test에 새 이미지가 들어가거나 정답이 수정되면 평가 기준도 바뀝니다. 모델 비교에는 같은
   `--dataset-version`과 `--split`을 사용합니다. 자동 채택을 포함하지 않아 train이 없는 릴리스는
   평가 데이터로는 보관할 수 있지만 학습에는 사용할 수 없습니다.

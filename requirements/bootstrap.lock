@@ -1,0 +1,5 @@
+# Install before runtime requirements; local source builds use these versions.
+--index-url https://pypi.org/simple
+pip==24.0
+setuptools==78.1.0
+wheel==0.45.1
