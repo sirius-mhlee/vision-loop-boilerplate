@@ -1,13 +1,14 @@
-# Required: copy to project.yaml and enter your own dataset and classes.
-image_dir: null
-classes: []
-# classes:
-#   - id: <project class ID>
-#     name: <class name>
-#     prompts: [<SAM 3 text prompt>]
+# Penn-Fudan photo-only example: download/extract with the README commands.
+# Copy to project.yaml. For your own data, replace image_dir, dataset_name and classes.
+# Point to PNGImages, not data/ or PennFudanPed/: annotation masks are also PNGs.
+image_dir: data/PennFudanPed/PNGImages
+classes:
+  - id: 1
+    name: person
+    prompts: [person]
 
 # Common (relative paths are resolved from this YAML file)
-dataset_name: vision-loop
+dataset_name: penn-fudan
 storage_dir: .vloop
 device: cuda:0
 seed: 42
@@ -44,6 +45,9 @@ train_num_workers: 0
 train_gradient_checkpointing: false
 
 # Release / Evaluation
+# These ratios split manually approved groups on the first release.
+# Automatically accepted groups are train-only, so sample-rate 0.2 does NOT
+# imply that the final dataset will contain 80% train / 10% val / 10% test.
 split_ratios: [0.8, 0.1, 0.1]
 # Optional FiftyOne string field identifying a capture/scene group.
 # null treats each image as its own group; supply group metadata before the first release.

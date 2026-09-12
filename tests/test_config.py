@@ -63,7 +63,7 @@ def test_invalid_config_is_rejected(project, patch):
         load_config(project.config_path)
 
 
-def test_examples_never_supply_real_classes(tmp_path):
+def test_empty_configuration_requires_explicit_inputs(tmp_path):
     path = tmp_path / "project.yaml"
     path.write_text("image_dir: null\nclasses: []\n")
     cfg = load_config(path)

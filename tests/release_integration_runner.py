@@ -1,6 +1,8 @@
 """Exercise the real FiftyOne -> approval -> DVC -> restore boundary in a fresh process."""
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -53,7 +55,23 @@ def run(path):
                 change_reviews(cfg, [sample_id], "complete", "test", confirm_empty=True)["changed"]
                 == 1
             )
-        report = release(cfg, version="v001")
+        # A CLI process must select the project DB before its first FiftyOne import.
+        process = subprocess.run(
+            [sys.executable, "-m", "vloop", "release", "--config", str(path), "--version", "v001"],
+            cwd=root,
+            env={
+                key: value
+                for key, value in os.environ.items()
+                if key not in ("FIFTYONE_CONFIG_PATH", "FIFTYONE_DATABASE_DIR")
+            },
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert process.returncode == 0, process.stdout + process.stderr
+        reports = list((cfg.storage_dir / "runs").glob("release_*/report.json"))
+        assert len(reports) == 1
+        report = json.loads(reports[0].read_text())
         assert report["status"] == "completed", report
         restored = restore(cfg, version="v001")
         assert restored["status"] == "completed", restored
@@ -77,6 +95,7 @@ def run(path):
                     "checks": [
                         "FiftyOne SampleView",
                         "manual approvals",
+                        "fresh release CLI without inherited FiftyOne config path or DB directory",
                         "DVC remote",
                         "restoration",
                         "edited approval rejection",

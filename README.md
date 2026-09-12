@@ -11,26 +11,34 @@ A boilerplate for an iterative computer vision pipeline covering auto-labeling, 
 확인했습니다. 승인된 COCO 데이터를 DVC에 저장하고 Git 태그로 복원하는 경로도 구현했습니다.
 RF-DETR 학습·MLflow 기록·체크포인트 재개와 저장 모델의 새 프로세스 복원을 검증했습니다.
 평가 CLI와 박스·마스크 지표, FiftyOne 분석 화면을 연결했습니다.
-실제 도메인 데이터의 `v002` 재학습 비교는 후속 단계입니다.
+공개 Penn-Fudan 사진 8장으로 `v001`·`v002` 학습과 동일 val 비교까지 실행했습니다.
+이전 [자동 통합 검증](docs/TOY.md)은 제공된 정답 마스크를 사용했습니다. 직접 사진만 받아
+SAM 3 예측을 사람이 검수하는 절차는 아래 [Penn-Fudan 직접 실습](#penn-fudan-직접-실습)에 있습니다.
+1~7단계 핵심 기능은 구현됐으며, 최종 의존성 lock·새 컴퓨터 설치 검증·대규모 실측·실제 도메인
+성능 검증은 남아 있습니다.
 
 ## Requirement
 
-- Linux, Python 3.12 가상환경
+- Linux, Python 3.12 가상환경, Git·curl·unzip
+- CUDA를 사용할 NVIDIA GPU와 호환 드라이버. 호스트에서 `nvidia-smi`가 동작해야 합니다.
 - GPU 검증: PyTorch 2.10.0 + CUDA 12.8, torchvision 0.25.0
 - 초기 호환성 기준: FiftyOne 1.21.0, RF-DETR 1.8.2, MLflow 3.16.0
 
 ```shell
+git clone https://github.com/sirius-mhlee/vision-loop-boilerplate.git
+cd vision-loop-boilerplate
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
-python -m pip install -e '.[dev,autolabel]'
+python -m pip install -e '.[dev,autolabel,pipeline]'
 ```
 
 `autolabel` extra는 FiftyOne과 SAM 3 실행에 필요한 주변 라이브러리를 설치합니다.
 SAM 3 패키지 자체와 체크포인트는 포함하지 않으므로 아래 소스 설치 절차도 필요합니다.
 검증한 NumPy 1.26.4, OpenCV 4.11.0.86 등의 버전을 지정했습니다.
 
-`pipeline` extra는 FiftyOne·RF-DETR·MLflow·DVC를 설치하며, 해당 단계 작업 시 추가합니다.
+`pipeline` extra는 FiftyOne·RF-DETR·MLflow·DVC를 설치합니다. 위 명령은 전체 실습용 의존성을
+함께 설치합니다. 자동 라벨링만 필요할 때는 `.[dev,autolabel]`로 시작하고 나중에 추가해도 됩니다.
 FiftyOne은 두 extra에 같은 버전으로 선언되어 있어 함께 선택해도 중복 설치되지 않습니다.
 FiftyOne 하위 패키지 ETA 0.17과 MLflow를 같은 프로세스에서 사용하기 위해
 `importlib-metadata==7.2.1`도 고정합니다. 8 이상에서는 누락된 메타데이터 키 조회가
@@ -38,11 +46,13 @@ FiftyOne 하위 패키지 ETA 0.17과 MLflow를 같은 프로세스에서 사용
 [importlib-metadata 변경 기록](https://importlib-metadata.readthedocs.io/en/latest/history.html#v8-0-0)
 
 ```shell
+# pipeline을 아직 설치하지 않은 환경에서만 추가
 python -m pip install -e '.[pipeline]'
 ```
 
-`pyproject.toml`의 버전은 초기 확인 대상입니다. 전체 파이프라인 검증 전에는 완성된 의존성
-lock으로 취급하지 않습니다. 각 실행의 `dependencies.json`에는 실제 설치 버전을 저장합니다.
+`pyproject.toml`에는 검증한 주요 라이브러리 버전을 지정했습니다. 전체 전이 의존성을 고정한
+lock 파일은 아직 없으므로 새 환경에서는 하위 패키지 버전이 달라질 수 있습니다.
+각 실행의 `dependencies.json`에는 실제 설치 버전을 저장합니다.
 PyTorch wheel은 CUDA 12.8 런타임을 포함합니다. `nvidia-smi`에 표시되는 CUDA 버전과
 `torch.version.cuda`는 별개의 값입니다.
 
@@ -52,8 +62,11 @@ PyTorch wheel은 CUDA 12.8 런타임을 포함합니다. `nvidia-smi`에 표시�
 cp project.example.yaml project.yaml
 ```
 
-`project.yaml`에 실제 `image_dir`, `classes`의 `id`·`name`·`prompts`를 입력합니다.
-예시 파일에는 실제 적용 가능한 클래스 기본값이 없습니다. `project.yaml`은 Git에서 제외합니다.
+`project.example.yaml`에는 Penn-Fudan 사진 경로 `data/PennFudanPed/PNGImages`, 데이터셋 이름
+`penn-fudan`, 클래스 ID `1`·이름 `person`·프롬프트 `[person]`을 채웠습니다. 아래 다운로드·압축
+해제 후 사용할 수 있습니다. 직접 수집한 데이터에는 `image_dir`, `dataset_name`, `classes`를
+맞게 바꿉니다. 기존 DB의 클래스 매핑을 바꾸는 절차는 아니므로 다른 프로젝트는 별도 저장소를
+사용합니다. `project.yaml`과 `data/`는 Git에서 제외합니다.
 
 - 기존 DACON 프로젝트의 `argparse` + `dataclass Config` + 평탄한 YAML 형식을 따릅니다.
 - 상대 경로는 YAML 파일이 있는 폴더를 기준으로 해석합니다.
@@ -87,7 +100,7 @@ Python·의존성 버전, 필수 입력, 저장 경로 쓰기 가능 여부, DVC
 
 ```shell
 git clone https://github.com/facebookresearch/sam3.git .vloop/vendor/sam3
-git -C .vloop/vendor/sam3 rev-parse HEAD
+git -C .vloop/vendor/sam3 checkout 660a5e9e1b8b4c02c0ad97229b88a09a6e4ff5b7
 python -m pip install -e .vloop/vendor/sam3
 ```
 
@@ -98,9 +111,20 @@ python -m pip install -e .vloop/vendor/sam3
 python -m pip install -e '.[dev,autolabel]' -e .vloop/vendor/sam3
 ```
 
-출력된 전체 커밋을 `sam3_commit`, 체크아웃 경로를 `sam3_source_dir`, 내려받은 가중치 경로를
-실제 `project.yaml`의 `sam3_checkpoint`에 입력합니다. `project.example.yaml`만 수정해도
-기존 `project.yaml`에는 자동 반영되지 않습니다. 위 SAM 3 설치는 PyTorch 설치 후 수행합니다.
+예제 YAML의 `sam3_commit`, `sam3_source_dir`, `sam3_checkpoint`는 위 소스와 아래 가중치 경로에
+맞춰져 있습니다. 다른 경로를 쓰면 실제 `project.yaml`도 수정합니다. `project.example.yaml`만
+수정해도 기존 `project.yaml`에는 자동 반영되지 않습니다. 위 SAM 3 설치는 PyTorch 설치 후 수행합니다.
+
+[SAM 3 체크포인트 페이지](https://huggingface.co/facebook/sam3)에서 접근 권한을 받은 계정으로
+로그인한 뒤 가중치를 받습니다. 다른 컴퓨터에서도 이 인증 또는 이미 받은 파일의 복사가 필요합니다.
+
+```shell
+hf auth login
+hf download facebook/sam3 sam3.pt --local-dir .vloop/models/sam3
+```
+
+이미 받은 `sam3.pt`가 있으면 다운로드 대신 `.vloop/models/sam3/sam3.pt`에 복사합니다.
+인증 토큰이나 가중치를 Git에 넣지 않습니다.
 
 이번에 검증한 SAM 3 커밋은 `660a5e9e1b8b4c02c0ad97229b88a09a6e4ff5b7`입니다.
 다른 환경에서 같은 구성을 준비하려면 SAM 3 저장소를 이 커밋으로 체크아웃한 뒤 설치합니다.
@@ -131,6 +155,224 @@ concept 모드에 클래스별 프롬프트를 전달합니다. 공식 모델 wr
 공식 `truck.jpg`(1800×1200)에서 트럭 1개를 검출했고, PyTorch 최대 할당 메모리는
 5.26 GiB, 최대 예약 메모리는 5.51 GiB였습니다. 이는 샘플 이미지의 측정값이며 해상도·객체 수와
 다른 GPU 프로그램의 사용량에 따라 달라집니다. CUDA 추론만 검증했으며 CPU 경로는 미검증입니다.
+
+## Penn-Fudan 직접 실습
+
+**공개 정답을 읽지 않고 사진만 받아 `ingest`부터 직접 실행하는 절차**입니다.
+위 Requirement → Config → SAM 3 설치·체크포인트 준비를 마친 뒤, clone한 프로젝트 루트에서
+실행합니다. `project.example.yaml`을 `project.yaml`로 복사하면 아래 데이터 경로와 `person`
+클래스가 이미 설정돼 있습니다. 기존 8장짜리 자동 통합 검증 스크립트는 이 실습에 사용하지 않습니다.
+
+### 1. 사진 다운로드와 압축 해제
+
+[Penn-Fudan 공식 데이터](https://www.cis.upenn.edu/~jshi/ped_html/)의 ZIP은 약 51 MB이며 사진
+170장이 들어 있습니다. ZIP에는 정답도 있지만 **`PNGImages`의 사진만 선택해서 압축을 풉니다.**
+`PedMasks`와 `Annotation`은 추출하지 않으며 파이프라인에서 읽지 않습니다.
+
+```shell
+mkdir -p data
+curl -fL --retry 3 \
+  -o data/PennFudanPed.zip \
+  https://www.cis.upenn.edu/~jshi/ped_html/PennFudanPed.zip
+unzip -n data/PennFudanPed.zip 'PennFudanPed/PNGImages/*.png' -d data
+```
+
+`-n`은 같은 파일이 있으면 덮어쓰지 않습니다. 설정과 실제 경로는 다음과 같습니다.
+
+```yaml
+image_dir: data/PennFudanPed/PNGImages
+dataset_name: penn-fudan
+classes:
+  - id: 1
+    name: person
+    prompts: [person]
+```
+
+```text
+vision-loop-boilerplate/
+├── project.yaml
+├── data/
+│   ├── PennFudanPed.zip
+│   └── PennFudanPed/PNGImages/    # 입력 사진 170장
+└── .vloop/                      # ingest 이후 관리 이미지·예측·DB·모델·DVC cache
+```
+
+`data/`와 `.vloop/`는 이미 Git ignore 대상입니다. 데이터를 Git에 추가하거나 별도 예제 Git
+저장소를 만들 필요가 없습니다. 이 실습의 릴리스 태그는 지금 clone한 Git 저장소에 생성됩니다.
+
+```shell
+vloop doctor
+```
+
+처음에는 RF-DETR 초기 가중치가 없어 `rfdetr_checkpoint`만 실패할 수 있습니다.
+`train_checkpoint: null`이면 첫 `train`에서 공식 가중치를 내려받습니다. 다른 항목의 실패는
+해당 설정·설치를 해결한 뒤 진행합니다. 짧게 실행하려면 `project.yaml`의 `epochs: 30`을
+`epochs: 2`로 바꿉니다. 2 epochs는 기능 확인용이며 충분한 학습을 의미하지 않습니다.
+
+### 2. 등록과 자동 라벨링
+
+```shell
+vloop ingest
+vloop autolabel
+```
+
+170장 전체를 처리합니다. `autolabel` 출력의 성공·실패·빈 예측 건수를 확인합니다.
+실패·중단이 있으면 출력된 작업 ID로 `vloop autolabel --resume AUTO_LABEL_JOB_ID`를 사용합니다.
+다음 블록의 `autolabel_...`에는 실제 출력된 `Job ID`를 넣습니다.
+
+```shell
+AUTO_LABEL_JOB_ID=autolabel_...
+vloop review-batch --job-id "$AUTO_LABEL_JOB_ID" \
+  --min-confidence 0.5 --sample-rate 0.2 --actor "$USER"
+```
+
+`sample-rate`는 `review-batch`의 옵션입니다. 실습에서는 `autolabel_confidence: 0.5`와 같은
+채택 기준을 사용합니다. 저장된 비어 있지 않은 예측 중 약 20%를 `sample`로 남기고 나머지를
+자동 채택 후보로 만듭니다. 정확히 34장을 뽑는 옵션은 아니며, 성공·신뢰도·빈 예측 여부에 따라
+대상도 달라집니다. 예측에 없는 사람은 신뢰도만으로 알 수 없으므로 표본에서는 누락도 확인합니다.
+
+출력의 `decisions`를 확인한 뒤 적용합니다. 아래 `review_batch_...`는 방금 만든 **미리보기의
+작업 ID**로 바꿉니다. 자동 라벨링 작업 ID와 구별합니다.
+
+```shell
+REVIEW_BATCH_JOB_ID=review_batch_...
+vloop review-batch --resume "$REVIEW_BATCH_JOB_ID" --apply
+```
+
+적용하면 `accept` 대상은 `auto_accepted`가 되고, `sample`은 아직 승인되지 않은 검수 대상으로
+남습니다. 미리보기만 만들고 적용하지 않으면 이 상태 변경과 검수 큐 등록이 일어나지 않습니다.
+
+### 3. 표본을 사람이 검수
+
+```shell
+vloop review --job-id "$AUTO_LABEL_JOB_ID" --queue sample --limit 170
+```
+
+`--limit 170`은 이번 작은 실습에서 검수용 정답을 준비할 최대 장수입니다. 화면에는 `sample`
+큐만 열립니다. 예측은 `pred_...`에 보관되고 편집할 라벨은 `ground_truth`입니다.
+
+1. 이미지를 열고 백틱 키로 operator 검색창을 열어 `VLoop: 검수 시작 / 재검수`를 실행합니다.
+2. `Annotate`에서 `ground_truth`의 사람별 마스크·박스·클래스를 확인하고 누락·오탐을 수정합니다.
+   새 사람을 추가할 때도 마스크가 필요합니다.
+3. 저장된 결과를 확인한 뒤 `Explore`에서 `VLoop: 검수 완료`를 실행합니다. 검수자와 확인
+   체크를 입력합니다. 승인되면 `completed`가 되고 sample 큐에서 빠집니다.
+4. 남은 표본을 같은 방식으로 검수하고, 터미널에서 `Ctrl+C`로 검수 서버를 닫습니다.
+
+표본 전체를 확인한 뒤 선택해서 승인할 수는 있지만, 단순히 전체 선택으로 확인 과정을 대체하지
+않습니다. 한 번의 수동 operator는 최대 100장입니다. 완료 목록은 `vloop-completed` 저장 뷰에서
+다시 볼 수 있습니다.
+
+이번 실습에서 `sample`만 처리하면 `low_confidence`·`empty` 등 미승인 이미지는 릴리스에서
+빠집니다. 포함하고 싶을 때만 해당 큐도 열어 검수합니다. `empty`는 실제 사람이 없는지 확인하고,
+누락된 사람이 있으면 정답을 추가해야 합니다. `preserve`는 기존 승인·편집 내용을 보존한 경우도
+있으므로 사유를 확인하고, `error`나 적용 실패는 수정 전까지 정상 처리로 간주하지 않습니다.
+
+```shell
+# 해당 이미지까지 포함하고 싶은 경우
+vloop review --queue low_confidence --limit 170
+vloop review --queue empty --limit 170
+```
+
+### 4. 분할 확인과 릴리스
+
+**20% 표본 검수와 train/val/test = 80/10/10 분할은 서로 독립적입니다.** 현재 첫 릴리스는
+자동 채택 이미지를 train에만 넣고, 수동 승인 이미지를 `split_ratios`의 해시 구간으로 나눕니다.
+예를 들어 후보 1,000장을 모두 포함하고 200장을 수동 승인했다고 가정하면 예상 구성은 다음과 같습니다.
+
+| 승인 종류 | train | val | test |
+|---|---:|---:|---:|
+| 자동 채택 약 800장 | 800 | 0 | 0 |
+| 수동 승인 약 200장 | 160 | 20 | 20 |
+| 합계 | 약 960 | 약 20 | 약 20 |
+
+즉, 이 흐름은 **대략 96/2/2**이고, 20% 표본을 val/test에 절반씩 넣는 기능은 아닙니다.
+개수는 해시 분할의 관찰값에 따라 달라지며 작은 데이터에서는 val/test가 비어 있을 수도 있습니다.
+자동 라벨을 평가 정답으로 넣어 80/10/10을 맞추지는 않습니다.
+
+전체를 대략 80/10/10으로 나누는 현재 방식은 첫 릴리스 전에 전체 이미지를 사람이 검수·승인하는
+것입니다. 이때도 정확한 장수는 보장하지 않습니다. **약 20%만 검수하면서 그 전부를 val/test로
+사용하려면, 평가 대상 선정과 검수 표본을 연결하는 별도 분할 정책이 필요하며 현재는 미구현입니다.**
+이미 v001을 확정한 뒤 train 이미지를 수동 승인해도 기존 split은 유지됩니다.
+고신뢰도 후보에서만 뽑은 표본은 어려운 이미지·미검출 사례를 대표하지 않을 수 있으므로,
+도메인 성능 검증에는 충분한 독립 평가 데이터를 준비해야 합니다.
+
+표본 검수 실습은 현재 정책으로 진행합니다. 자동 채택도 train에 포함하려면
+`--include-auto-accepted`가 필요합니다. 먼저 분할·빈 정답·클래스별 객체 수를 확인합니다.
+데이터 태그를 만들려면 이 컴퓨터의 Git 이름·이메일이 설정돼 있어야 합니다.
+
+```shell
+vloop release --version v001 --include-auto-accepted --prepare-only
+```
+
+train/val 모두에 이미지와 정답 객체가 있는지 확인합니다. `test`는 최종 평가용이므로 실제로
+test를 평가하려면 해당 이미지도 있어야 합니다. 부족하면 `vloop review --limit 170`의
+`vloop-auto_accepted` 등에서 추가로 직접 검수하거나 데이터를 보충합니다.
+**준비 이후 검수를 바꿨다면 같은 `--version v001 ... --prepare-only` 명령으로 새 준비 작업을
+만들어 다시 확인합니다.** 이전 준비 작업의 스냅샷은 바뀌지 않으므로 이전 ID로 재개하지 않습니다.
+아직 버전 태그를 생성하지 않은 상태에서만 같은 버전의 새 준비 작업을 만들 수 있습니다.
+
+구성이 확인된 **최신 준비 작업 ID**로 저장·업로드·태그 생성을 완료합니다.
+
+```shell
+RELEASE_JOB_ID=release_...
+vloop release --resume "$RELEASE_JOB_ID"
+```
+
+이제 `dataset/v001` 태그와 DVC remote `../vision-loop-dvc-remote`에 확정 데이터가 남습니다.
+`--include-auto-accepted`를 빼면 수동 승인한 표본만 릴리스됩니다. 미검수 이미지가 자동으로
+승인되지는 않습니다. `review-audit`는 이 절차의 필수 선행 명령이 아닙니다.
+
+### 5. 학습과 평가 화면
+
+```shell
+vloop train --dataset-version v001
+```
+
+clone한 커밋 그대로라면 학습할 수 있습니다. 소스나 README, `project.example.yaml` 등 Git 추적
+파일을 수정했다면 먼저 자신의 변경을 커밋해야 합니다. Git에서 제외된 `project.yaml`, 데이터,
+실행 결과는 커밋하지 않아도 되며 최종 설정은 작업에 기록됩니다.
+
+```shell
+TRAIN_JOB_ID=train_...
+vloop evaluate --job-id "$TRAIN_JOB_ID" --dataset-version v001 --split val
+
+EVALUATE_JOB_ID=evaluate_...
+vloop evaluate --view "$EVALUATE_JOB_ID"
+```
+
+각 변수는 바로 앞 명령이 출력한 실제 작업 ID로 바꿉니다. `--view`는 저장 결과를 열며 다시
+추론하지 않습니다. 예측이 기본 `display_confidence` 뷰에서 안 보이면 `all` 뷰로 바꿔 봅니다.
+짧은 학습은 예측 신뢰도가 낮을 수 있습니다. `Ctrl+C`로 화면 서버를 닫은 뒤 MLflow도 열 수 있습니다.
+
+```shell
+vloop experiments
+# 서버만 띄우고 주소를 직접 열려면 위 화면 명령에 --no-browser 추가
+```
+
+### 6. v002로 반복하기
+
+val 오류를 참고해 **train 데이터의** 누락·오탐을 재검수하거나 새 학습 사진을 추가합니다.
+정답은 여전히 SAM 3 예측과 사람의 수정으로 만들며 Penn-Fudan의 제공 정답을 읽지 않습니다.
+새 사진이 있다면 `ingest` → `autolabel` → 새 `review-batch` 미리보기·적용 → `review`를
+반복합니다. 기존 승인·편집은 보존됩니다.
+
+```shell
+vloop release --version v002 --include-auto-accepted
+vloop train --dataset-version v002
+
+TRAIN_V002_JOB_ID=train_...
+vloop evaluate --job-id "$TRAIN_V002_JOB_ID" --dataset-version v001 --split val
+```
+
+두 모델을 같은 v001 val로 평가해 `comparison_id`와 지표를 비교합니다. 기존 데이터의 split은
+유지되고, 후속 릴리스의 새 이미지는 기본적으로 train에 추가됩니다. test 결과는 반복 개선에
+사용하지 않고 최종 모델을 정한 뒤 명시적으로 실행합니다.
+
+```shell
+vloop evaluate --job-id "$TRAIN_V002_JOB_ID" --dataset-version v001 --split test
+# 확정 데이터 자체를 별도로 다시 복원할 때
+vloop restore --version v001
+```
 
 ## Ingest
 
@@ -919,8 +1161,8 @@ FiftyOne DB와 모델 저장소는 프로젝트의 `storage_dir` 아래에 둡�
 
 ```shell
 python -m pytest -q
-ruff check src tests
-ruff format --check src tests
+ruff check src tests examples
+ruff format --check src tests examples
 ```
 
 실제 FiftyOne DB를 사용하는 검증은 호스트에서 별도로 실행합니다. 임시 이미지·DB를 만들고,
@@ -948,6 +1190,16 @@ RF-DETR GPU 검증은 별도로 실행합니다. 기본 관리 경로의 공식 
 VLOOP_TEST_TRAIN=1 python -m pytest tests/test_train_integration.py -q
 # 100만 건 COCO 인덱스 로딩만 측정: 실제 픽셀 읽기·학습은 포함하지 않음
 python tests/train_loader_scale_runner.py --count 1000000
+```
+
+두 버전의 데이터·모델·평가 이력 보존 검증은 별도 GPU 테스트로 실행합니다. 생성 이미지에
+학습 라벨 수정과 새 이미지를 반영하고, 고정 val의 비교 ID 일치, 기존 split·COCO ID,
+이전 아티팩트·태그 보존, 과거 데이터 복원 후 현재 검수 정답 보존을 확인합니다.
+실제 사진과 SAM 3까지 자동으로 연결하는 검증에는 [공개 정답 사용 예제](docs/TOY.md)를 사용합니다.
+정답을 가져오지 않고 직접 검수할 때는 [Penn-Fudan 직접 실습](#penn-fudan-직접-실습)을 따릅니다.
+
+```shell
+VLOOP_TEST_ITERATION=1 python -m pytest tests/test_iteration_integration.py -q
 ```
 
 100만 건의 합성 메타데이터를 SQLite 작업 목록으로 만드는 메모리 검증:

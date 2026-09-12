@@ -26,11 +26,11 @@ from .runtime import finish_run, project_lock, sha256_file, start_run, write_jso
 
 
 def _samples(cfg, *, include_auto=False):
-    from fiftyone import ViewField as F
-
     from .review import load_review_dataset
 
     dataset = load_review_dataset(cfg)
+    from fiftyone import ViewField as F
+
     if not dataset.has_sample_field("review_status"):
         raise ValueError("Run vloop review and approve labels before release")
     fields = [
