@@ -26,6 +26,16 @@ def configure_fiftyone(cfg: Config):
     os.environ["FIFTYONE_MODEL_ZOO_DIR"] = str(cfg.storage_dir / "models")
     os.environ["FIFTYONE_PLUGINS_DIR"] = str(cfg.storage_dir / "fiftyone/plugins")
     import fiftyone as fo
+    from fiftyone.core.odm import get_db_conn
+
+    # FiftyOne may attach to another local process's MongoDB despite database_dir.
+    options = get_db_conn().client.admin.command("getCmdLineOpts")
+    actual_directory = options.get("parsed", {}).get("storage", {}).get("dbPath")
+    if actual_directory is None or Path(actual_directory).resolve() != database_dir.resolve():
+        raise RuntimeError(
+            f"FiftyOne connected to a different database directory: {actual_directory}; "
+            f"expected {database_dir}. Close other projects' FiftyOne processes and retry"
+        )
 
     fo.config.database_dir = str(database_dir)
     fo.config.default_app_address = "127.0.0.1"

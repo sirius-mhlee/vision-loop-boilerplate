@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from .approval import approved_annotation
 from .review import _transition, load_review_dataset
-from .runtime import finish_run, project_lock, start_run, write_json
+from .runtime import cli_command, finish_run, project_lock, start_run, write_json
 
 
 def review_audit(cfg, *, resume=None):
@@ -18,12 +18,10 @@ def review_audit(cfg, *, resume=None):
             raise ValueError("Use a review_audit job ID")
         directory = cfg.storage_dir / "runs" / resume
         report = json.loads((directory / "report.json").read_text())
+        if not {"after", "upper", "checked", "invalidated"} <= report.keys():
+            raise ValueError("Audit initialization was not completed; start a new review-audit job")
     else:
         directory, report = start_run(cfg, "review_audit")
-        last = dataset._sample_collection.find_one({}, {"_id": 1}, sort=[("_id", -1)])
-        report.update(
-            after=None, upper=str(last["_id"]) if last else None, checked=0, invalidated=0
-        )
     with project_lock(SimpleNamespace(storage_dir=directory)):
         snapshot = json.loads((directory / "config.json").read_text())
         if snapshot["dataset_name"] != cfg.dataset_name or snapshot["storage_dir"] != str(
@@ -32,7 +30,14 @@ def review_audit(cfg, *, resume=None):
             raise ValueError("Audit belongs to a different project")
         report.update(status="running")
         report.pop("error", None)
+        report.pop("finished_at", None)
         try:
+            if not resume:
+                last = dataset._sample_collection.find_one({}, {"_id": 1}, sort=[("_id", -1)])
+                report.update(
+                    after=None, upper=str(last["_id"]) if last else None, checked=0, invalidated=0
+                )
+            write_json(directory / "report.json", report)
             while report["upper"]:
                 query = {
                     "review_status": {"$in": ["completed", "auto_accepted"]},
@@ -69,5 +74,6 @@ def review_audit(cfg, *, resume=None):
             report.update(status="interrupted", error="Interrupted; resume this audit")
         except Exception as exc:
             report.update(status="failed", error=str(exc))
-        report["retry"] = f"vloop review-audit --resume {report['job_id']}"
+        arguments = ("--resume", report["job_id"]) if "upper" in report else ()
+        report["retry"] = cli_command(cfg, "review-audit", *arguments)
         return finish_run(directory, report)

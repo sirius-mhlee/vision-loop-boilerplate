@@ -6,6 +6,7 @@ import yaml
 
 from . import __version__
 from .config import load_config
+from .runtime import cli_command
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -93,7 +94,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Validate labels and estimate image storage without copying/uploading images",
     )
-    restore = commands.add_parser("restore", help="Restore a tagged dataset into a separate cache")
+    restore = commands.add_parser(
+        "restore", help="Restore a tagged dataset into a separate directory using the shared cache"
+    )
     restore.add_argument("--version", required=True, help="Dataset version, e.g. v001")
     train = commands.add_parser("train", help="Train a dataset release and record an MLflow run")
     selection = train.add_mutually_exclusive_group(required=True)
@@ -281,7 +284,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Decisions: {report.get('decisions', {})}")
         print(f"Applied: {report.get('applied', 0)}, outcomes: {report.get('outcomes', {})}")
         if report["status"] == "ready":
-            print(f"Preview only. Apply: vloop review-batch --resume {report['job_id']} --apply")
+            command = cli_command(cfg, "review-batch", "--resume", report["job_id"], "--apply")
+            print(f"Preview only. Apply: {command}")
     elif args.command == "review-audit":
         print(f"Audited: {report.get('checked', 0)}, invalidated: {report.get('invalidated', 0)}")
     elif args.command == "train":
@@ -303,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         if report["status"] == "completed":
             print(f"Comparison ID: {report['comparison_id']}")
-            print(f"View: vloop evaluate --config {cfg.config_path} --view {report['job_id']}")
+            print(f"View: {cli_command(cfg, 'evaluate', '--view', report['job_id'])}")
     else:
         for split, counts in report.get("summary", {}).get("splits", {}).items():
             print(

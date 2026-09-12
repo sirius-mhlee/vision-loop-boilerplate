@@ -16,7 +16,7 @@ from .config import config_from_dict
 from .labels import to_detections
 from .review import _save_change, ensure_review_schema, load_review_dataset
 from .review_store import connect_records, save_record
-from .runtime import finish_run, project_lock, sha256_file, start_run, write_json
+from .runtime import cli_command, finish_run, project_lock, sha256_file, start_run, write_json
 
 DECISIONS = ("accept", "sample", "low_confidence", "empty", "preserve", "error")
 
@@ -357,6 +357,7 @@ def review_batch(
             report = json.loads((directory / "report.json").read_text())
         report.update(status="running", mode="apply" if apply else "preview")
         report.pop("error", None)
+        report.pop("finished_at", None)
         try:
             with closing(_connect(directory / "samples.sqlite3")) as connection:
                 if not resume:
@@ -437,9 +438,11 @@ def review_batch(
             report.update(status="interrupted", error="Interrupted; resume with the same mode")
         except Exception as exc:
             report.update(status="failed", error=f"{type(exc).__name__}: {exc}")
-            if not (directory / "manifest.json").is_file():
-                report["error"] += "; snapshot initialization is incomplete, create a new preview"
-        report["retry"] = f"vloop review-batch --resume {report['job_id']}" + (
-            " --apply" if apply else ""
-        )
+        arguments = ["--resume", report["job_id"]]
+        if apply:
+            arguments.append("--apply")
+        report["retry"] = cli_command(cfg, "review-batch", *arguments)
+        if not (directory / "manifest.json").is_file() or "manifest_sha256" not in report:
+            report.pop("retry", None)
+            report["error"] += "; snapshot initialization is incomplete, create a new preview"
         return finish_run(directory, report)

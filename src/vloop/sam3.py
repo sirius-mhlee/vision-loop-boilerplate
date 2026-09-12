@@ -47,7 +47,7 @@ class Sam3Labeler:
         import torch
 
         self.torch = torch
-        self.device = torch.device(self.cfg.device)
+        self.device = torch.device("cuda:0" if self.cfg.device == "cuda" else self.cfg.device)
         if self.device.type == "cuda":
             torch.cuda.set_device(self.device)
             torch.cuda.init()

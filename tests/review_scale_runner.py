@@ -89,4 +89,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--count", type=int, default=1_000_000)
     args = parser.parse_args()
+    if args.count < 1:
+        parser.error("count must be positive")
     print(json.dumps(run(args.count), indent=2))

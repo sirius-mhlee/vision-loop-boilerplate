@@ -67,4 +67,6 @@ if __name__ == "__main__":
     parser.add_argument("--count", type=int, default=100000)
     parser.add_argument("--output", type=Path, default=Path(".vloop/train-loader-scale.json"))
     args = parser.parse_args()
+    if args.count < 1:
+        parser.error("count must be positive")
     measure(args.count, args.output)

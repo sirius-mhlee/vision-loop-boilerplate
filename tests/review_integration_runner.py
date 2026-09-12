@@ -16,11 +16,11 @@ from vloop.ingest import ingest
 from vloop.labels import encode_mask
 from vloop.review import (
     _save_change,
-    audit_reviews,
     change_reviews,
     load_review_dataset,
     prepare_review,
 )
+from vloop.review_audit import review_audit
 from vloop.runtime import sha256_file, write_json
 
 
@@ -114,7 +114,8 @@ def run(config_path):
         raise AssertionError("Changed mask was incorrectly accepted")
     except ValueError as exc:
         assert "changed" in str(exc)
-    assert audit_reviews(cfg, dataset) == 1
+    audit = review_audit(cfg)
+    assert audit["status"] == "completed" and audit["invalidated"] == 1, audit
     first.reload()
     assert first["review_status"] == "in_progress"
     assert first["review_approved_hash"] is None
@@ -150,7 +151,8 @@ def run(config_path):
         raise AssertionError("Stale change was incorrectly accepted")
     except RuntimeError as exc:
         assert "changed during" in str(exc)
-    assert audit_reviews(cfg, dataset) == 1
+    audit = review_audit(cfg)
+    assert audit["status"] == "completed" and audit["invalidated"] == 1, audit
 
     from fiftyone.plugins.context import build_plugin_contexts
 

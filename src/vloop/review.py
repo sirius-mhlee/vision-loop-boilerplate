@@ -251,31 +251,6 @@ def change_reviews(cfg, sample_ids, action, reviewer, *, note="", confirm_empty=
         return result
 
 
-def audit_reviews(cfg, dataset=None, *, after=None, upper=None, limit=None):
-    dataset = dataset or load_review_dataset(cfg)
-    invalidated = 0
-    query = {"review_status": {"$in": ["completed", "auto_accepted"]}}
-    if after is not None or upper is not None:
-        from bson import ObjectId
-
-        query["_id"] = {}
-        if after:
-            query["_id"]["$gt"] = ObjectId(after)
-        if upper:
-            query["_id"]["$lte"] = ObjectId(upper)
-    view = dataset.match(query).sort_by("id")
-    if limit:
-        view = view.limit(limit)
-    for sample in view:
-        sample.reload()
-        try:
-            approved_annotation(cfg, sample, allow_auto=True)
-        except (ValueError, OSError, KeyError) as exc:
-            _transition(cfg, dataset, sample, "invalidate", "vloop", str(exc))
-            invalidated += 1
-    return invalidated
-
-
 def audit_changed_reviews(cfg, dataset):
     """Follow indexed modification timestamps; never rehash all approved images on a timer."""
     from bson import ObjectId

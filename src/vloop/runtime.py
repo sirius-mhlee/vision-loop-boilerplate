@@ -2,6 +2,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import tempfile
 from contextlib import contextmanager
@@ -11,6 +12,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from .config import Config
+
+
+def cli_command(cfg: Config, command: str, *arguments: str) -> str:
+    return shlex.join(["vloop", command, "--config", str(cfg.config_path), *arguments])
 
 
 def sha256_file(path: Path) -> str:

@@ -9,7 +9,15 @@ from types import SimpleNamespace
 
 from .config import config_from_dict
 from .release_dvc import descriptor, git, project_repo, restore_data, version_name
-from .runtime import finish_run, git_output, project_lock, sha256_file, start_run, write_json
+from .runtime import (
+    cli_command,
+    finish_run,
+    git_output,
+    project_lock,
+    sha256_file,
+    start_run,
+    write_json,
+)
 from .tracking import artifact_directory, create_run, manifest_hash, read_resume, run_id_for_job
 
 TRAIN_DEPENDENCIES = (
@@ -254,9 +262,7 @@ def train(cfg, *, dataset_version=None, resume=None, notes=None):
         finally:
             has_checkpoint = artifacts and (artifacts / "resume/latest.json").is_file()
             if has_checkpoint and report["status"] != "completed":
-                report["retry"] = (
-                    f"vloop train --config {cfg.config_path} --resume {report['job_id']}"
-                )
+                report["retry"] = cli_command(cfg, "train", "--resume", report["job_id"])
             elif not has_checkpoint and report["status"] == "interrupted":
                 report["error"] = (
                     "Interrupted before the first epoch checkpoint; start a new training run"

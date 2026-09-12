@@ -22,7 +22,7 @@ from .release_dvc import (
     version_name,
     versions,
 )
-from .runtime import finish_run, project_lock, sha256_file, start_run, write_json
+from .runtime import cli_command, finish_run, project_lock, sha256_file, start_run, write_json
 
 
 def _samples(cfg, *, include_auto=False):
@@ -105,7 +105,7 @@ def release(
     report.update(
         status="running",
         dataset_version=version,
-        retry=f"vloop --config {cfg.config_path} release --resume {report['job_id']}",
+        retry=cli_command(cfg, "release", "--resume", report["job_id"]),
     )
     report.pop("error", None)
     # Separate from the review lock; reviewers can keep working. The successful scan

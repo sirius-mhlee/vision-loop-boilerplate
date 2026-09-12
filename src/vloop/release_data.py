@@ -208,6 +208,7 @@ def _array(handle, values):
 
 
 def export_coco(cfg, snapshot, root, *, manual_to_val_test=False):
+    class_to_index = cfg.class_to_index
     classes = [
         {"id": c.id, "name": c.name, "supercategory": "object"}
         for c in sorted(cfg.classes, key=lambda c: c.id)
@@ -215,7 +216,7 @@ def export_coco(cfg, snapshot, root, *, manual_to_val_test=False):
     summary = {
         "splits": {},
         "split_directories": SPLITS,
-        "classes": [{**c, "model_index": i} for i, c in enumerate(classes)],
+        "classes": [{**c, "model_index": class_to_index[c["id"]]} for c in classes],
         "group_field": cfg.release_group_field,
         "seed": cfg.seed,
         "split_ratios": list(cfg.split_ratios),

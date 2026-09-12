@@ -1,10 +1,13 @@
 import json
+import shlex
+from dataclasses import replace
 
 import pytest
 import yaml
 
 from vloop.cli import main, parse_args
-from vloop.config import load_config
+from vloop.config import ClassConfig, load_config
+from vloop.runtime import cli_command
 
 
 def test_relative_paths_and_explicit_class_mapping(project, monkeypatch, tmp_path):
@@ -21,6 +24,20 @@ def test_relative_paths_and_explicit_class_mapping(project, monkeypatch, tmp_pat
 def test_find_config_from_child(project, monkeypatch):
     monkeypatch.chdir(project.image_dir)
     assert load_config().config_path == project.config_path
+
+
+def test_model_indices_follow_numeric_class_ids_not_yaml_order(project):
+    cfg = replace(project, classes=(ClassConfig(42, "other", ("other",)), *project.classes))
+    assert cfg.class_to_index == {7: 0, 42: 1}
+    assert list(cfg.prompt_to_class) == ["other", "test object"]
+
+
+def test_printed_commands_preserve_config_paths_with_shell_characters(project):
+    cfg = replace(project, config_path=project.config_path.parent / "my project's $(config).yaml")
+    command = cli_command(cfg, "review-batch", "--resume", "review_batch_id", "--apply")
+    arguments = parse_args(shlex.split(command)[1:])
+    assert arguments.config == str(cfg.config_path)
+    assert arguments.resume == "review_batch_id" and arguments.apply
 
 
 @pytest.mark.parametrize(

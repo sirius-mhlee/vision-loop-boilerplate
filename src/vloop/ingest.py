@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 from .config import Config
-from .runtime import finish_run, project_lock, sha256_file, start_run, write_json
+from .runtime import cli_command, finish_run, project_lock, sha256_file, start_run, write_json
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
@@ -144,7 +144,7 @@ def ingest(cfg: Config, *, local_only: bool = False) -> dict:
             report.update(status="failed", error=f"{type(exc).__name__}: {exc}")
             if report["sync_status"] == "pending":
                 report["sync_status"] = "incomplete"
-        report["retry"] = f"vloop ingest --config {cfg.config_path}"
+        report["retry"] = cli_command(cfg, "ingest")
         if local_only:
             report["retry"] += " --local-only"
         return finish_run(directory, report)

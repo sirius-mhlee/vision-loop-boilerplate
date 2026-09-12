@@ -7,9 +7,8 @@ import sqlite3
 import tempfile
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
-from vloop.config import ClassConfig
+from vloop.config import ClassConfig, Config
 from vloop.release_data import export_coco, validate_coco
 from vloop.runtime import write_json
 
@@ -25,7 +24,7 @@ def run(count, output):
             db.execute("PRAGMA cache_size=-8192")
             db.execute(
                 "CREATE TABLE records (image_id TEXT PRIMARY KEY, managed_sha256 TEXT, "
-                "annotation TEXT, split TEXT, automatic INTEGER, coco_id INTEGER)"
+                "annotation TEXT, split TEXT, automatic INTEGER, coco_id INTEGER, held_reason TEXT)"
             )
             db.execute("CREATE INDEX records_split ON records(split, image_id)")
             for i in range(count):
@@ -41,13 +40,13 @@ def run(count, output):
                 }
                 split = "train" if i % 10 < 8 else "val" if i % 10 == 8 else "test"
                 db.execute(
-                    "INSERT INTO records VALUES (?, ?, ?, ?, 0, ?)",
+                    "INSERT INTO records VALUES (?, ?, ?, ?, 0, ?, NULL)",
                     (digest, digest, json.dumps(content), split, i + 1),
                 )
                 if i % 5000 == 0:
                     db.commit()
         populated = time.perf_counter()
-        cfg = SimpleNamespace(
+        cfg = Config(
             classes=(ClassConfig(7, "object", ("object",)),),
             release_group_field=None,
             seed=42,

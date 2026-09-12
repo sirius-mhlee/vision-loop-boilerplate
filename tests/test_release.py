@@ -86,11 +86,12 @@ def release_project(project):
 
 
 def test_streamed_export_empty_rle_provenance_and_tampering(release_project, tmp_path):
-    cfg = release_project
+    cfg = replace(release_project, classes=tuple(reversed(release_project.classes)))
     samples = [make_sample(cfg, 1), make_sample(cfg, 2, empty=True)]
     snapshot = tmp_path / "export/metadata/snapshot.sqlite3"
     capture(cfg, iter(samples), snapshot)
     summary = export_coco(cfg, snapshot, snapshot.parent.parent)
+    assert [(c["id"], c["model_index"]) for c in summary["classes"]] == [(7, 0), (42, 1)]
     validate_coco(cfg, snapshot, snapshot.parent.parent)
     assert sum(s["images"] for s in summary["splits"].values()) == 2
     assert sum(s["empty"] for s in summary["splits"].values()) == 1

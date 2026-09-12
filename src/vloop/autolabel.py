@@ -7,7 +7,7 @@ from contextlib import ExitStack, closing
 from pathlib import Path
 
 from .config import Config, config_from_dict
-from .runtime import finish_run, project_lock, sha256_file, start_run, write_json
+from .runtime import cli_command, finish_run, project_lock, sha256_file, start_run, write_json
 from .sam3 import Sam3Labeler, model_identity
 
 
@@ -141,7 +141,7 @@ def autolabel(cfg: Config, *, resume: str | None = None, limit: int | None = Non
                     status="interrupted",
                     error="Interrupted before input snapshot was completed; start a new job",
                     initialization_failed=True,
-                    retry=f"vloop autolabel --config {cfg.config_path}",
+                    retry=cli_command(cfg, "autolabel"),
                 )
                 return finish_run(directory, report)
             except Exception as exc:
@@ -149,7 +149,7 @@ def autolabel(cfg: Config, *, resume: str | None = None, limit: int | None = Non
                     status="failed",
                     error=str(exc),
                     initialization_failed=True,
-                    retry=f"vloop autolabel --config {cfg.config_path}",
+                    retry=cli_command(cfg, "autolabel"),
                 )
                 return finish_run(directory, report)
         else:
@@ -166,7 +166,7 @@ def autolabel(cfg: Config, *, resume: str | None = None, limit: int | None = Non
             report.pop("error", None)
             report.pop("finished_at", None)
             report.pop("runtime", None)
-        report["retry"] = f"vloop autolabel --config {cfg.config_path} --resume {report['job_id']}"
+        report["retry"] = cli_command(cfg, "autolabel", "--resume", report["job_id"])
         report.update(processed_this_attempt=0, reused_results=0)
         labeler = None
         try:
@@ -261,7 +261,14 @@ def autolabel(cfg: Config, *, resume: str | None = None, limit: int | None = Non
                             if type(exc).__name__ == "OutOfMemoryError" or loading_model:
                                 raise
                         finally:
-                            report.update(_counts(connection))
+                            status, object_count = connection.execute(
+                                "SELECT status, object_count FROM images WHERE image_id = ?",
+                                (image_id,),
+                            ).fetchone()
+                            # Update this row's contribution; full-table counts belong at startup.
+                            report[image["status"]] -= 1
+                            report[status] += 1
+                            report["empty"] += int(status == "completed" and object_count == 0)
                             write_json(directory / "report.json", report)
                 report["status"] = (
                     "completed" if report["completed"] == report["total"] else "failed"

@@ -27,6 +27,7 @@ def test_real_gpu_interruption_resume_and_human_label_preservation(tmp_path):
         image_dir=str(images),
         storage_dir=str(tmp_path / "state"),
         dataset_name="vloop-gpu-integration",
+        device="cuda",
         classes=[
             {"id": 7, "name": "truck", "prompts": ["truck"]},
             {"id": 42, "name": "apple", "prompts": ["apple"]},
@@ -37,7 +38,6 @@ def test_real_gpu_interruption_resume_and_human_label_preservation(tmp_path):
     setup = r"""
 import json
 import sys
-from pathlib import Path
 import numpy as np
 from vloop.config import load_config
 from vloop.ingest import ingest
@@ -109,7 +109,7 @@ import sys
 from pathlib import Path
 from vloop.config import load_config
 from vloop.fiftyone import configure_fiftyone
-from vloop.labels import decode_mask, from_detection
+from vloop.labels import decode_mask
 cfg = load_config(sys.argv[1])
 fo = configure_fiftyone(cfg)
 dataset = fo.load_dataset(cfg.dataset_name)

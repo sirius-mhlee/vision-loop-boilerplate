@@ -47,6 +47,10 @@ FiftyOne 하위 패키지 ETA 0.17과 MLflow를 같은 프로세스에서 사용
 `KeyError`로 바뀌어 현재 ETA의 `author` 조회가 실패합니다.
 [importlib-metadata 변경 기록](https://importlib-metadata.readthedocs.io/en/latest/history.html#v8-0-0)
 
+이 고정은 현재 조합의 실행 오류를 막는 호환성 조치입니다. ETA 자체의 메타데이터 조회가
+수정된 것은 아닙니다. 이 핀을 올리려면 ETA의 수정 여부를 확인하고 FiftyOne·MLflow를 같은
+프로세스에서 사용하는 평가 통합 테스트를 통과해야 합니다.
+
 ```shell
 # pipeline을 아직 설치하지 않은 환경에서만 추가
 python -m pip install --no-build-isolation -c requirements/linux-py312-cu128.lock -e '.[pipeline]'
@@ -77,7 +81,8 @@ cp project.example.yaml project.yaml
 - 상대 경로는 YAML 파일이 있는 폴더를 기준으로 해석합니다.
 - `--config`가 없으면 현재 폴더부터 Git 프로젝트 루트까지 `project.yaml`을 찾습니다.
 - 설정 오타, 중복 클래스 ID·이름, 모호한 프롬프트, 잘못된 비율·임계값은 오류로 보고합니다.
-- 프로젝트 클래스 ID와 연속 인덱스는 `Config.class_to_index`로 명시적으로 연결합니다.
+- 프로젝트 클래스 ID와 연속 인덱스는 `Config.class_to_index`로 연결합니다. YAML에 적은 순서와
+  관계없이 클래스 ID 오름차순으로 0부터 배정하며, COCO 릴리스와 RF-DETR에서 같은 매핑을 씁니다.
 - `storage_dir`와 `image_dir`는 겹칠 수 없습니다. DVC remote는 Git 저장소 밖에 둡니다.
 
 ## Doctor
@@ -298,8 +303,9 @@ vloop review --queue empty --limit 170
 
 실제 비율은 표본 수·미승인 이미지·그룹 크기에 따라 달라집니다. 표본 외 `low_confidence`·`empty`를
 추가로 수동 승인하면 그 신규 이미지도 val/test 후보가 되므로 평가 데이터 비율이 커질 수 있습니다.
-작은 데이터에서는 val/test가 비어 있을 수도 있습니다. 옵션 없이 첫 릴리스를 만들면 기존의
-수동 승인분 80/10/10 분할을 사용하므로 위 예시는 약 96/2/2가 됩니다.
+작은 데이터에서는 val/test가 비어 있을 수도 있습니다. `--include-auto-accepted`만 사용하고
+`--manual-to-val-test`를 생략하면 수동 승인분도 80/10/10으로 나뉘어 위 예시는 약 96/2/2가 됩니다.
+두 옵션을 모두 생략하면 수동 승인 약 200장만 포함해 약 160/20/20장으로 나눕니다.
 
 자동 채택도 train에 포함하려면 `--include-auto-accepted`가 필요합니다.
 먼저 분할·빈 정답·클래스별 객체 수를 확인합니다.
@@ -417,7 +423,7 @@ vloop ingest --local-only
 ```shell
 vloop ingest
 vloop autolabel --limit 3
-vloop autolabel --resume <JOB_ID>
+vloop autolabel --resume JOB_ID
 ```
 
 `--limit`는 새 작업의 입력을 이미지 ID 순으로 제한합니다. 생략하면 현재 등록된 전체 이미지를
@@ -440,9 +446,13 @@ FiftyOne에는 박스 내부 마스크를 저장하고, JSON에는 이미지 전
 
 ## Review
 
+이 문서의 `AUTO_LABEL_JOB_ID`, `REVIEW_BATCH_JOB_ID`, `TRAIN_JOB_ID` 같은 표기는 각 명령이
+출력한 실제 작업 ID로 바꿔 입력합니다. `$AUTO_LABEL_JOB_ID`처럼 `$`가 붙은 예제는 앞에서
+해당 셸 변수에 작업 ID를 저장한 경우입니다.
+
 ```shell
 vloop review
-vloop review --job-id <AUTO_LABEL_JOB_ID>
+vloop review --job-id AUTO_LABEL_JOB_ID
 vloop review --prepare-only
 vloop review --no-browser
 vloop review --queue sample --limit 100
@@ -475,6 +485,12 @@ vloop review --queue sample --limit 100
 원래 `pred_<job-id>`는 별도 필드로 남기고 Annotation Schema에서 읽기 전용으로 설정합니다.
 실패·미완료 예측은 빈 정답으로 바꾸지 않습니다.
 
+`--job-id`는 아직 준비하지 않은 정답에 복사할 예측의 기본 출처입니다. 화면을 그 작업의
+이미지만으로 제한하거나, 이미 준비한 정답을 다른 모델의 예측으로 교체하는 옵션은 아닙니다.
+`review-batch`가 만든 queue에는 이미지별 출처 작업이 저장되어 있으며, 이 출처가 `--job-id`보다
+우선합니다. 따라서 미리보기를 적용한 뒤 `review --queue low_confidence`처럼 열 때는 작업 ID를
+생략해도 해당 queue를 만든 예측을 사용합니다.
+
 ### 화면에서 검수하기
 
 1. 이미지를 열고 `ground_truth`를 표시합니다. 비교가 필요하지 않으면 `pred_...` 표시는 끕니다.
@@ -500,7 +516,7 @@ FiftyOne 1.21에서 펼쳐 둔 이미지의 상태 표시가 이전 값을 유�
 | `vloop-auto_accepted` | 자동 예측 일괄 채택 |
 | `vloop-excluded` | 제외 |
 | `vloop-queue-sample` | 전체 미검수 후보에서 신뢰도와 무관하게 뽑은 표본; 빈 예측도 포함 |
-| `vloop-queue-low_confidence` | 표본 외 이미지 중 기준 이하 객체가 있거나 신뢰도 정보가 없는 이미지 |
+| `vloop-queue-low_confidence` | 표본 외 이미지 중 기준 미만 객체가 있거나 신뢰도 정보가 없는 이미지 |
 | `vloop-queue-empty` | 표본 외 이미지 중 객체를 예측하지 못한 이미지 |
 
 ### 대량 이미지의 일괄 채택
@@ -509,7 +525,7 @@ FiftyOne 1.21에서 펼쳐 둔 이미지의 상태 표시가 이전 값을 유�
 만들어 예상 건수를 확인합니다. 아래 임계값과 표본 비율은 실행 방법을 보여주는 예시입니다.
 
 ```shell
-vloop review-batch --job-id <AUTO_LABEL_JOB_ID> --min-confidence 0.9 --sample-rate 0.001 --actor mhlee
+vloop review-batch --job-id AUTO_LABEL_JOB_ID --min-confidence 0.9 --sample-rate 0.001 --actor mhlee
 ```
 
 - 성공 예측이 있는 미검수 후보 전체에서 `sample-rate` 비율을 먼저 `sample`로 뽑습니다.
@@ -531,7 +547,7 @@ vloop review-batch --job-id <AUTO_LABEL_JOB_ID> --min-confidence 0.9 --sample-ra
 - 실제 적용은 미리보기 결과의 `review_batch_...` ID를 지정합니다. 자동 라벨링 ID와 다릅니다.
 
 ```shell
-vloop review-batch --resume <REVIEW_BATCH_JOB_ID> --apply
+vloop review-batch --resume REVIEW_BATCH_JOB_ID --apply
 ```
 
 채택한 정답은 `ground_truth`에 저장하고 상태를 **`auto_accepted`**, 종류를 `automatic`으로
@@ -589,7 +605,7 @@ DB 수정 시점을 바꾸지 않는 외부 파일 변경이나 직접 DB 조작
 
 ```shell
 vloop review-audit
-vloop review-audit --resume <REVIEW_AUDIT_JOB_ID>
+vloop review-audit --resume REVIEW_AUDIT_JOB_ID
 ```
 
 `review-audit`는 승인된 이미지 파일·마스크·승인 기록을 읽어 확인하는 전체 검사입니다.
@@ -626,8 +642,8 @@ RF-DETR 1.8.2의 실제 COCO 로더로 저장·복원·마스크 보존을 검�
 
 ### 생성과 복원
 
-현재 가상환경에는 검증용 의존성을 설치했습니다. 새 환경에서는 위의 `pipeline` extra를
-설치하거나, 자동 라벨링 환경에 이번 릴리스에 필요한 의존성만 추가할 수 있습니다.
+위의 전체 lock 설치 절차에는 릴리스 의존성도 포함됩니다. 자동 라벨링용으로만 준비한 환경에는
+릴리스에 필요한 의존성만 추가할 수 있습니다.
 
 ```shell
 python -m pip install --no-build-isolation -c requirements/linux-py312-cu128.lock \
@@ -644,7 +660,7 @@ vloop release --version v001
 # 방법 2: 같은 수동 승인 대상을 준비만 하기 (이미지 복사·업로드·태그 생성 없음)
 vloop release --version v001 --prepare-only
 # 위 준비 작업이 출력한 작업 ID로 실제 저장
-vloop release --resume <RELEASE_JOB_ID>
+vloop release --resume RELEASE_JOB_ID
 
 # 과거 버전 복원: 현재 Git checkout과 FiftyOne 데이터는 유지
 vloop restore --version v001
@@ -660,7 +676,7 @@ vloop restore --version v001
 이미 완성된 `v001`을 다시 지정해도 `v002`로 바뀌지 않고 오류가 발생합니다. 다음 버전은
 사용자가 `--version v002`처럼 기존 버전보다 큰 번호로 실행합니다.
 
-여기서 **재개는 `release --resume <RELEASE_JOB_ID>`로 같은 릴리스 생성 작업을 이어가는 것**입니다.
+여기서 **재개는 `release --resume RELEASE_JOB_ID`로 같은 릴리스 생성 작업을 이어가는 것**입니다.
 `--prepare-only`로 준비해 둔 작업이나 저장 도중 중단된 작업에 사용합니다. 작업에 기록된
 대상 버전과 시작 당시 `project.yaml` 설정, 자동 채택 포함 여부, 수동 승인 분할 정책을 다시
 사용하므로 `--version`, `--include-auto-accepted`, `--manual-to-val-test`를 재지정하지 않습니다.
@@ -807,7 +823,7 @@ DVC의 저장·전송은 다음 역할로 나뉩니다.
 
 아래는 이미지 내용이 서로 다른 A·B를 `v001`로 릴리스한 뒤, 새 이미지 C를 더해
 A·B·C를 `v002`로 릴리스하는 예입니다. 실제 파일명에는 이미지 해시를 사용합니다.
-릴리스 작업 폴더는 `.vloop/runs/<RELEASE_JOB_ID>/dvc-work/dataset/`입니다.
+릴리스 작업 폴더는 `.vloop/runs/RELEASE_JOB_ID/dvc-work/dataset/`입니다.
 
 | 순서 | v001: A·B를 처음 릴리스 |
 |---|---|
@@ -999,7 +1015,7 @@ train_gradient_checkpointing: false
 
 - `train_checkpoint: null`이면 첫 학습에서 공식 Seg Nano 가중치를
   `storage_dir/models/rfdetr/rf-detr-seg-nano.pt`에 받고 검증한 뒤 재사용합니다.
-  직접 준비한 초기 가중치는 로컬 경로로 지정할 수 있습니다. **학습 재개에는 아래 run ID 옵션을
+  직접 준비한 초기 가중치는 로컬 경로로 지정할 수 있습니다. **학습 재개에는 아래 작업 ID 옵션을
   사용합니다.** 초기 가중치 지정만으로 이전 옵티마이저·에포크 상태를 이어가지는 않습니다.
 - 입력 해상도는 모델 기본값 312이며, RF-DETR의 기본 다중 해상도 증강을 사용하므로 실제 학습
   입력 크기는 달라질 수 있습니다. 전체 모델·학습 기본값까지 `training.json`에 저장합니다.
@@ -1039,7 +1055,7 @@ MLflow 메타데이터는 `storage_dir/mlflow/mlflow.db`, 모델 파일은
 ### 중단한 학습 재개
 
 ```shell
-vloop train --resume <TRAIN_JOB_ID>
+vloop train --resume TRAIN_JOB_ID
 ```
 
 사용자는 학습 시작 시 출력하는 **`train_...` 형태의 vloop 작업 ID만 사용**합니다. 보고서의
@@ -1057,7 +1073,7 @@ MLflow 초기화가 실패해도 vloop 작업 폴더의 설정·오류·보고�
 시작합니다. 작업 ID가 있다는 것과 재개 가능한 학습 체크포인트가 있다는 것은 별개입니다.
 
 원래 run의 데이터 버전·학습 설정을 가져오므로 현재 YAML의 `epochs`, 학습률 등을 바꿔도
-재개에는 적용하지 않습니다. 이 로컬 구현은 원래 작업의 `runs/<TRAIN_JOB_ID>/report.json`과
+재개에는 적용하지 않습니다. 이 로컬 구현은 원래 작업의 `runs/TRAIN_JOB_ID/report.json`과
 MLflow 저장소에 접근할 수 있어야 합니다.
 원래 코드 커밋과 학습 의존성 버전이 같아야 하며, 태그·고정 설정·체크포인트 해시가 달라지면
 재개를 거부합니다. 로컬 저장소와 DVC remote 경로는 현재 설정으로 연결합니다.
@@ -1178,6 +1194,11 @@ report.json         # 완료/실패, 처리 건수, 결과 체크섬, 소요 시
 `--limit`은 이미지 ID 순서로 앞 N장을 선택하며, 선택 범위가 달라지면 비교 해시도 달라집니다.
 작은 일부 이미지의 점수를 val 전체 결과로 해석하지 않습니다.
 
+`vloop experiments`에서 `vloop.kind=evaluate`와 같은 `vloop.comparison_id` 태그를 가진
+평가 run들을 골라 지표를 비교합니다. `comparison_id`가 같아도 두 평가는 별도 작업으로
+보존됩니다. 이미지별 결과는 각 평가의 `vloop evaluate --view EVALUATE_JOB_ID`로 확인하며,
+화면을 다시 여는 것만으로 새 평가 작업이나 비교 ID를 만들지 않습니다.
+
 입력·예측은 SQLite로 저장하고 추론은 한 장씩, FiftyOne 적재는 20장씩 처리합니다. 다만
 **FiftyOne의 mAP 계산은 전체 객체 매칭 결과를 RAM에 모읍니다. 100만 장 전체 평가의 메모리
 상한은 보장하지 않습니다.** 평가 DB도 이미지당 GT·예측 라벨 공간을 사용합니다.
@@ -1222,16 +1243,40 @@ report.json         # 완료/실패, 처리 건수, 결과 체크섬, 소요 시
 
 FiftyOne DB와 모델 저장소는 프로젝트의 `storage_dir` 아래에 둡니다. 앱 연결 주소는
 `127.0.0.1`로 설정합니다. MLflow 서버는 `vloop experiments`로 엽니다.
+FiftyOne 1.21은 같은 사용자의 기존 MongoDB 프로세스를 재사용할 수 있으므로 서로 다른
+프로젝트의 FiftyOne을 동시에 실행하지 않습니다. 실제 DB 경로가 설정과 다르면 vloop는
+라벨을 읽거나 쓰기 전에 오류를 반환합니다. 이 경우 다른 프로젝트의 FiftyOne 프로세스를
+종료하고 다시 실행합니다. 같은 프로젝트의 검수 화면과 CLI는 같은 DB를 사용할 수 있습니다.
 완성된 학습 데이터 버전은 위의 `release` / `restore` 절차로 저장·복원합니다.
 이미지·모델·DB를 Git에 직접 추가하지 않습니다.
 
 ## Test
 
+코드 변경 후 기본 검사는 다음과 같습니다.
+
 ```shell
 python -m pytest -q
-ruff check src tests examples
-ruff format --check src tests examples
+ruff check src tests examples requirements
+ruff format --check src tests examples requirements
+python -m pip check
+python requirements/check.py
 ```
+
+기본 pytest 실행은 GPU·로컬 서버를 사용하는 선택 테스트를 건너뜁니다. 아래 환경 변수를
+모두 지정하면 전체 테스트를 실행합니다. 전체 lock 환경, 사용 가능한 NVIDIA GPU, SAM 3
+소스·체크포인트가 연결된 설정 파일과 기본 관리 경로의 RF-DETR Seg Nano 가중치가 필요합니다.
+테스트는 임시 DB·데이터·Git 저장소를 사용하며, 기본 프로젝트의 검수·릴리스는 변경하지 않습니다.
+`requirements/check.py`는 전체 lock 설치 환경에서 실행합니다.
+
+```shell
+VLOOP_TEST_FIFTYONE=1 VLOOP_TEST_RELEASE=1 VLOOP_TEST_MLFLOW=1 \
+VLOOP_TEST_TRAIN=1 VLOOP_TEST_ITERATION=1 \
+VLOOP_TEST_SAM3_CONFIG="$PWD/project.yaml" \
+NO_ALBUMENTATIONS_UPDATE=1 python -m pytest -q
+```
+
+서로 다른 프로젝트의 FiftyOne 화면이나 Python 세션은 먼저 종료합니다. 테스트 중에도 같은
+사용자로 다른 프로젝트의 FiftyOne을 시작하면 DB 경로 검증에서 실패할 수 있습니다.
 
 실제 FiftyOne DB를 사용하는 검증은 호스트에서 별도로 실행합니다. 임시 이미지·DB를 만들고,
 다른 프로세스의 재등록 후 수정 내용 보존, 검수 승인·무효화·재승인, 빈 정답,

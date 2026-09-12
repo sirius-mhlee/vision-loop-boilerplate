@@ -84,6 +84,7 @@ def test_interruption_freezes_inputs_and_prompts(project, backend):
     report = module.autolabel(project)
     assert report["status"] == "interrupted", report
     assert report["completed"] == 1
+    assert (report["processing"], report["pending"], report["empty"]) == (1, 1, 1)
     first = backend["calls"][0][0]
     path = Path(report["result_dir"]) / "predictions" / f"{first}.json"
     before = sha256_file(path)
@@ -95,6 +96,7 @@ def test_interruption_freezes_inputs_and_prompts(project, backend):
     assert resumed["status"] == "completed", resumed
     assert resumed["total"] == 3
     assert resumed["processed_this_attempt"] == 2
+    assert (resumed["processing"], resumed["pending"], resumed["empty"]) == (0, 0, 3)
     assert sha256_file(path) == before
     assert all(classes == project.classes for _, classes in backend["calls"])
     assert (Path(report["result_dir"]) / "attempts/0001.json").is_file()
@@ -122,6 +124,7 @@ def test_database_retry_reuses_saved_inference(project, backend):
     resumed = module.autolabel(project, resume=report["job_id"])
     assert resumed["status"] == "completed", resumed
     assert resumed["reused_results"] == 3
+    assert (resumed["failed"], resumed["empty"]) == (0, 3)
     assert len(backend["calls"]) == 3
 
 
@@ -194,3 +197,18 @@ def test_hard_exit_before_snapshot_cannot_resume_incomplete_manifest(project, ba
     assert not (directory / "manifest.json").exists()
     with pytest.raises(ValueError, match="start a new"):
         module.autolabel(project, resume=report["job_id"])
+
+
+def test_progress_counts_do_not_rescan_all_images_per_prediction(project, backend, monkeypatch):
+    queries = []
+    open_job = module._open_job
+
+    def trace_job(path):
+        connection = open_job(path)
+        connection.set_trace_callback(queries.append)
+        return connection
+
+    monkeypatch.setattr(module, "_open_job", trace_job)
+    report = module.autolabel(project)
+    assert report["completed"] == report["empty"] == report["total"] == 3
+    assert sum("GROUP BY status" in query for query in queries) == 1

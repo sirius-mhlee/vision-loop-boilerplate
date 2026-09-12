@@ -58,7 +58,10 @@ class Config:
 
     @property
     def class_to_index(self) -> dict[int, int]:
-        return {item.id: index for index, item in enumerate(self.classes)}
+        return {
+            item.id: index
+            for index, item in enumerate(sorted(self.classes, key=lambda item: item.id))
+        }
 
     @property
     def prompt_to_class(self) -> dict[str, ClassConfig]:

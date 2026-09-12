@@ -1,3 +1,3 @@
-"""Local image registration and environment tools for the vision loop."""
+"""Image ingestion, labeling, review, versioned datasets, training, and evaluation."""
 
 __version__ = "0.1.0"

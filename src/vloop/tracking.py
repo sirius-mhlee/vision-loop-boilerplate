@@ -29,7 +29,7 @@ def client_for(cfg):
     return MlflowClient(tracking_uri=cfg.mlflow_tracking_uri)
 
 
-def create_run(cfg, job_id, *, parent=None, notes=None, kind="train"):
+def create_run(cfg, job_id, *, notes=None, kind="train"):
     if kind not in ("train", "evaluate"):
         raise ValueError("Unsupported MLflow job kind")
     client = client_for(cfg)
@@ -42,8 +42,6 @@ def create_run(cfg, job_id, *, parent=None, notes=None, kind="train"):
     else:
         experiment_id = experiment.experiment_id
     tags = {"vloop.kind": kind, "vloop.job_id": job_id, "mlflow.runName": job_id}
-    if parent:
-        tags["vloop.resume_from_run_id"] = parent
     if notes:
         tags["mlflow.note.content"] = notes
     return client, client.create_run(experiment_id, tags=tags)
