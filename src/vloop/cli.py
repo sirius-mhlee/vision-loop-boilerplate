@@ -339,7 +339,7 @@ def main(argv: list[str] | None = None) -> int:
         from .review import serve_review
 
         try:
-            serve_review(cfg, no_browser=args.no_browser, queue=args.queue)
+            return serve_review(cfg, no_browser=args.no_browser, queue=args.queue)
         except (OSError, ValueError, RuntimeError) as exc:
             print(f"vloop review: {exc}", file=sys.stderr)
             return 1

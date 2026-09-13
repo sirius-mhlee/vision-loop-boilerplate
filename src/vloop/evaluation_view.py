@@ -1,13 +1,12 @@
 """FiftyOne COCO box/mask evaluation and a reproducible analysis dataset."""
 
 import json
-import threading
 from contextlib import closing
 from importlib.metadata import version
 
 import numpy as np
 
-from .fiftyone import configure_fiftyone
+from .fiftyone import close_session, configure_fiftyone
 from .labels import decode_mask
 from .release_data import connect
 
@@ -182,39 +181,3 @@ def serve(cfg, dataset, *, no_browser=False):
     finally:
         close_session(session)
     return 0
-
-
-def close_session(session):
-    """Bound FiftyOne 1.21's otherwise unbounded web-server shutdown wait.
-
-    Hypercorn may retain an active event-stream worker after SIGTERM. Only the
-    server service owned by this Python session is eligible for forced shutdown;
-    an existing shared server and the project MongoDB service are left alone.
-    """
-    import psutil
-    from fiftyone.core.session import session as session_module
-
-    service = session_module._server_services.get(session.server_port)
-    child = getattr(service, "child", None)
-    if child is None:
-        session.close()
-        return
-    try:
-        processes = [child, *child.children(recursive=True)]
-    except psutil.NoSuchProcess:
-        processes = []
-
-    def force_close():
-        for process in reversed(processes):
-            try:
-                process.kill()
-            except psutil.NoSuchProcess:
-                pass
-
-    timer = threading.Timer(5, force_close)
-    timer.daemon = True
-    timer.start()
-    try:
-        session.close()
-    finally:
-        timer.cancel()

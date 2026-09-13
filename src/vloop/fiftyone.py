@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 from .config import Config
@@ -97,3 +98,39 @@ def sync_catalog(cfg: Config, connection: sqlite3.Connection, progress) -> int:
         synced += 1
         progress.update()
     return synced
+
+
+def close_session(session):
+    """Bound FiftyOne 1.21's otherwise unbounded web-server shutdown wait.
+
+    Hypercorn may retain an active event-stream worker after SIGTERM. Only the
+    server service owned by this Python session is eligible for forced shutdown;
+    an existing shared server and the project MongoDB service are left alone.
+    """
+    import psutil
+    from fiftyone.core.session import session as session_module
+
+    service = session_module._server_services.get(session.server_port)
+    child = getattr(service, "child", None)
+    if child is None:
+        session.close()
+        return
+    try:
+        processes = [child, *child.children(recursive=True)]
+    except psutil.NoSuchProcess:
+        processes = []
+
+    def force_close():
+        for process in reversed(processes):
+            try:
+                process.kill()
+            except psutil.NoSuchProcess:
+                pass
+
+    timer = threading.Timer(5, force_close)
+    timer.daemon = True
+    timer.start()
+    try:
+        session.close()
+    finally:
+        timer.cancel()

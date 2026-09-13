@@ -576,3 +576,22 @@ def test_remote_validation_reads_content_not_only_names(release_project, tmp_pat
     object_path.write_bytes(b"modified")
     with pytest.raises(ValueError, match="remote object corrupted"):
         check_remote(cfg, tmp_path, ["data.dvc"])
+
+
+@pytest.mark.parametrize("remote", ["repo", "repo/remote", "."])
+def test_remote_cannot_overlap_git_even_with_external_storage(project, tmp_path, remote):
+    from vloop.doctor import check_remote
+    from vloop.release_dvc import project_repo
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    git(root, "init", "-q")
+    cfg = replace(
+        project,
+        config_path=root / "project.yaml",
+        storage_dir=tmp_path.parent / (tmp_path.name + "-external-storage"),
+        dvc_remote=(tmp_path / remote).resolve(),
+    )
+    for check in (check_remote, project_repo):
+        with pytest.raises(ValueError, match="Git repository"):
+            check(cfg)

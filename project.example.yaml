@@ -11,6 +11,7 @@ classes:
 dataset_name: penn-fudan
 storage_dir: .vloop
 device: cuda:0
+# Shared NumPy/Lightning seed range: 0..4294967295.
 seed: 42
 
 # Auto-labeling

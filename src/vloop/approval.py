@@ -1,4 +1,4 @@
-"""Canonical annotations and approval checks shared by review and future releases."""
+"""Canonical annotations and approval checks shared by review and releases."""
 
 import hashlib
 import json

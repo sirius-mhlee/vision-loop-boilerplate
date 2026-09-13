@@ -82,8 +82,7 @@ def child(mode, cfg_path, job_id=None):
         import urllib.request
 
         from vloop.evaluate import load_evaluation
-        from vloop.evaluation_view import close_session
-        from vloop.fiftyone import configure_fiftyone
+        from vloop.fiftyone import close_session, configure_fiftyone
 
         cfg = load_config(cfg_path)
         fo = configure_fiftyone(cfg)

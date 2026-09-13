@@ -45,6 +45,7 @@ def test_printed_commands_preserve_config_paths_with_shell_characters(project):
     [
         {"batch_szie": 2},
         {"seed": True},
+        {"seed": 2**32},
         {"batch_size": "1"},
         {"epochs": 0},
         {"learning_rate": float("nan")},

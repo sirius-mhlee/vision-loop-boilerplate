@@ -81,6 +81,7 @@ cp project.example.yaml project.yaml
 - 상대 경로는 YAML 파일이 있는 폴더를 기준으로 해석합니다.
 - `--config`가 없으면 현재 폴더부터 Git 프로젝트 루트까지 `project.yaml`을 찾습니다.
 - 설정 오타, 중복 클래스 ID·이름, 모호한 프롬프트, 잘못된 비율·임계값은 오류로 보고합니다.
+- `seed`는 NumPy·Lightning에서 사용할 수 있는 정수 `0`~`4294967295` 범위입니다.
 - 프로젝트 클래스 ID와 연속 인덱스는 `Config.class_to_index`로 연결합니다. YAML에 적은 순서와
   관계없이 클래스 ID 오름차순으로 0부터 배정하며, COCO 릴리스와 RF-DETR에서 같은 매핑을 씁니다.
 - `storage_dir`와 `image_dir`는 겹칠 수 없습니다. DVC remote는 Git 저장소 밖에 둡니다.
@@ -404,6 +405,8 @@ vloop ingest
 
 이미지 ID·원본 경로·관리 파일 해시·크기를 SQLite 목록에 기록한 뒤 영속 FiftyOne 데이터셋에
 동기화합니다. 동일 내용의 파일은 이미지 하나와 여러 원본 경로로 기록합니다.
+중복 판단은 원본 파일 바이트 기준입니다. 같은 사진도 인코딩·메타데이터가 다르면 별도 ID가
+될 수 있습니다. 같은 장면의 분할을 묶으려면 `release_group_field`를 채웁니다.
 재실행은 기존 `ground_truth`와 `review_status`를 보존합니다.
 손상·미지원 파일은 `files.jsonl`에 원인을 남기고 정상 파일 처리는 계속합니다.
 
@@ -438,6 +441,7 @@ vloop autolabel --resume JOB_ID
 - 객체가 없는 정상 결과는 빈 `Detections`로 저장합니다. 실패·미완료와 별도로 집계합니다.
 - 이미지별 오류는 기록하고 나머지 처리를 계속합니다. GPU 메모리 부족이나 모델 로딩 실패는
   작업을 멈추고 재개할 ID를 남깁니다. 실행 전 입력 스냅샷 생성에 실패하면 새 작업으로 시작합니다.
+  이때 출력하는 재실행 명령도 처음 지정한 `--limit`를 유지합니다.
 - 같은 클래스에 프롬프트를 여러 개 지정하면 중복 객체가 나올 수 있습니다. 프롬프트별 결과를
   보존하며, 중복 정리는 후속 검수에서 수행합니다.
 
@@ -471,6 +475,8 @@ vloop review --queue sample --limit 100
 두 명령 모두 준비 작업을 포함하므로 `--prepare-only`를 먼저 실행할 필요는 없습니다.
 `--no-browser`에서도 웹서버와 주기적인 승인 확인은 계속 실행됩니다. 이미 열린 브라우저나
 직접 입력한 URL로 접속할 때 사용하며, 터미널에서 `Ctrl+C`를 누르면 검수 서버가 종료됩니다.
+이 실행이 시작한 서버의 종료가 5초 넘게 지연되면 해당 서버 프로세스를 정리합니다.
+기존 공유 서버와 MongoDB는 이 강제 종료 대상에 포함하지 않습니다. 종료 코드는 `130`입니다.
 
 `--prepare-only`는 서버를 켜두지 않고 검수 필드·설정·초기 정답을 DB에 반영한 뒤 끝내야 하는
 자동화 스크립트나 테스트용 보조 옵션입니다. 조회나 미리보기만 하는 옵션은 아니며,
@@ -1301,6 +1307,9 @@ python requirements/check.py
 테스트는 임시 DB·데이터·Git 저장소를 사용하며, 기본 프로젝트의 검수·릴리스는 변경하지 않습니다.
 `requirements/check.py`는 전체 lock 설치 환경에서 실행합니다.
 
+문서에 기록된 `.vloop/`의 검증 결과·작업 ID는 당시 실행의 로컬 기록입니다. Git에는 포함되지
+않으며, 새 clone에서는 테스트와 예제를 실행해 해당 컴퓨터의 결과를 생성합니다.
+
 ```shell
 VLOOP_TEST_FIFTYONE=1 VLOOP_TEST_RELEASE=1 VLOOP_TEST_MLFLOW=1 \
 VLOOP_TEST_TRAIN=1 VLOOP_TEST_ITERATION=1 \
@@ -1377,7 +1386,7 @@ src/vloop/
 ├── config.py       # dataclass 설정과 검증
 ├── doctor.py       # 환경 검사
 ├── ingest.py       # 이미지 등록
-├── fiftyone.py     # DB 설정과 등록 목록 동기화
+├── fiftyone.py     # DB 설정, 등록 목록 동기화와 화면 서버 종료
 ├── autolabel.py    # 작업 스냅샷, 이미지별 상태, 재개
 ├── sam3.py         # FiftyOne SAM 3 adapter, 한 장 추론 확인
 ├── labels.py       # 박스·마스크 좌표 변환과 COCO RLE

@@ -1,7 +1,13 @@
 """Run with an isolated database so FiftyOne's process-wide configuration is contained."""
 
 import json
+import signal
+import socket
+import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -173,6 +179,35 @@ def run(config_path):
         raise AssertionError("Approval without confirmation was accepted")
     except ValueError:
         pass
+    # Exercise Ctrl+C through the public CLI, including a live HTTP server and cleanup.
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    data["fiftyone_port"] = port
+    path.write_text(yaml.safe_dump(data))
+    log_path = cfg.storage_dir / "review-server.log"
+    with log_path.open("w") as log:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "vloop", "review", "--config", str(path), "--no-browser"],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            deadline = time.monotonic() + 45
+            while True:
+                assert process.poll() is None, log_path.read_text()
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}", timeout=1) as response:
+                        assert response.status == 200
+                    break
+                except (OSError, urllib.error.URLError):
+                    assert time.monotonic() < deadline, log_path.read_text()
+                    time.sleep(0.2)
+        finally:
+            process.send_signal(signal.SIGINT)
+            process.wait(timeout=20)
+    assert process.returncode == 130, log_path.read_text()
+    assert len(load_review_dataset(cfg)) == 4  # Review shutdown kept the shared DB alive.
     print(
         json.dumps(
             {
@@ -187,6 +222,7 @@ def run(config_path):
                     "exclude",
                     "concurrent_edit",
                     "plugin_registration",
+                    "review_cli_http_and_interrupt_cleanup",
                 ],
             }
         )

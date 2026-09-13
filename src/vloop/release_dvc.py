@@ -38,7 +38,7 @@ def version_name(value):
 
 def project_repo(cfg):
     root = Path(git(cfg.config_path.parent, "rev-parse", "--show-toplevel"))
-    if cfg.dvc_remote.is_relative_to(root):
+    if cfg.dvc_remote.is_relative_to(root) or root.is_relative_to(cfg.dvc_remote):
         raise ValueError("dvc_remote must be a local directory outside the Git repository")
     if cfg.dvc_remote.is_relative_to(cfg.storage_dir) or cfg.storage_dir.is_relative_to(
         cfg.dvc_remote

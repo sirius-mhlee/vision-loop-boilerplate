@@ -1,4 +1,5 @@
 import json
+import shlex
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -178,18 +179,26 @@ def test_invalid_selection_rejected(project, resume, limit):
         module.autolabel(project, resume=resume, limit=limit)
 
 
-def test_interruption_during_snapshot_has_actionable_recovery(project, backend, monkeypatch):
+@pytest.mark.parametrize("failure", [KeyboardInterrupt, RuntimeError])
+def test_snapshot_failure_retry_preserves_limit(project, backend, monkeypatch, failure):
+    snapshot = module._snapshot
+
     def interrupt(cfg, directory, limit, progress):
-        raise KeyboardInterrupt
+        raise failure()
 
     monkeypatch.setattr(module, "_snapshot", interrupt)
-    report = module.autolabel(project)
-    assert report["status"] == "interrupted"
+    report = module.autolabel(project, limit=1)
+    assert report["status"] == ("interrupted" if failure is KeyboardInterrupt else "failed")
     assert report["initialization_failed"]
     assert "--resume" not in report["retry"]
     assert not backend["calls"]
     with pytest.raises(ValueError, match="start a new"):
         module.autolabel(project, resume=report["job_id"])
+    monkeypatch.setattr(module, "_snapshot", snapshot)
+    from vloop.cli import main
+
+    assert main(shlex.split(report["retry"])[1:]) == 0
+    assert len(backend["calls"]) == 1  # Never expand the retry to the full catalog.
 
 
 def test_hard_exit_before_snapshot_cannot_resume_incomplete_manifest(project, backend):

@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from .approval import annotation_content, approved_annotation, content_hash, record_path
 from .config import config_from_dict
-from .fiftyone import configure_fiftyone
+from .fiftyone import close_session, configure_fiftyone
 from .labels import to_detections
 from .progress import Progress
 from .runtime import finish_run, project_lock, sha256_file, start_run, write_json
@@ -436,6 +436,6 @@ def serve_review(cfg, *, no_browser=False, queue=None):
                 if "Another vloop operation" not in str(exc):
                     print(f"Review audit: {exc}", flush=True)
     except KeyboardInterrupt:
-        pass
+        return 130
     finally:
-        session.close()
+        close_session(session)

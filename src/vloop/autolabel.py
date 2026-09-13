@@ -142,6 +142,7 @@ def autolabel(cfg: Config, *, resume: str | None = None, limit: int | None = Non
                 raise ValueError("Set classes before starting auto-labeling")
             directory, report = start_run(cfg, "autolabel")
             report.update(attempt=1, prediction_field=f"pred_{report['job_id']}")
+            retry = cli_command(cfg, "autolabel", *(("--limit", str(limit)) if limit else ()))
             try:
                 _snapshot(cfg, directory, limit, progress)
             except KeyboardInterrupt:
@@ -149,7 +150,7 @@ def autolabel(cfg: Config, *, resume: str | None = None, limit: int | None = Non
                     status="interrupted",
                     error="Interrupted before input snapshot was completed; start a new job",
                     initialization_failed=True,
-                    retry=cli_command(cfg, "autolabel"),
+                    retry=retry,
                 )
                 return finish_run(directory, report)
             except Exception as exc:
@@ -157,7 +158,7 @@ def autolabel(cfg: Config, *, resume: str | None = None, limit: int | None = Non
                     status="failed",
                     error=str(exc),
                     initialization_failed=True,
-                    retry=cli_command(cfg, "autolabel"),
+                    retry=retry,
                 )
                 return finish_run(directory, report)
         else:

@@ -218,6 +218,8 @@ def config_from_dict(data: dict, config_path: Path) -> Config:
         raise ValueError("split_ratios must contain three positive numbers summing to 1")
     data["split_ratios"] = tuple(ratios)
     cfg = Config(**data, config_path=config_path)
+    if cfg.seed > 2**32 - 1:
+        raise ValueError("seed must be between 0 and 4294967295 (NumPy/Lightning limit)")
     if type(cfg.train_gradient_checkpointing) is not bool:
         raise ValueError("train_gradient_checkpointing must be a boolean")
     if cfg.release_group_field is not None and (
