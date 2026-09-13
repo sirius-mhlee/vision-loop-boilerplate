@@ -15,6 +15,7 @@ import sys
 import time
 from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from zipfile import ZipFile
 
 import numpy as np
@@ -51,6 +52,8 @@ def setup(base, workspace):
     manifest_path = workspace / "source/selection.json"
     if (root / "project.yaml").exists():
         return load_config(root / "project.yaml"), json.loads(manifest_path.read_text())
+    if root.exists():
+        raise ValueError(f"Incomplete toy project at {root}; use a new --workspace")
     archive = workspace / "source/PennFudanPed.zip"
     if not archive.is_file():
         raise ValueError(f"Download {SOURCE_URL} to {archive} first")
@@ -114,19 +117,25 @@ def setup(base, workspace):
         "purpose": "toy workflow check; not a benchmark or human annotation study",
     }
     write_json(manifest_path, manifest)
-    root.mkdir(parents=True)
-    shutil.copytree(source / "src", root / "src", ignore=shutil.ignore_patterns("__pycache__"))
-    shutil.copy2(Path(__file__), root / "toy.py")
-    (root / ".gitignore").write_text("project.yaml\n__pycache__/\n*.pyc\n")
-    git(root, "init", "-b", "main")
-    git(root, "config", "user.name", "Vloop Toy Example")
-    git(root, "config", "user.email", "toy@example.invalid")
-    git(root, "add", "src", "toy.py", ".gitignore")
-    git(root, "commit", "-qm", "Snapshot code for Penn-Fudan toy iteration")
-    data = cfg.to_dict()
-    data.pop("config_path")
-    cfg.config_path.write_text(yaml.safe_dump(data))
-    cfg.image_dir.mkdir()
+    # Publish only a fully initialized repo. Failed copies/commits must not look ready
+    # on the next attempt, and an existing completed snapshot is never overwritten.
+    with TemporaryDirectory(prefix=".repo-", dir=workspace) as temporary:
+        staged = Path(temporary)
+        shutil.copytree(
+            source / "src", staged / "src", ignore=shutil.ignore_patterns("__pycache__")
+        )
+        shutil.copy2(Path(__file__), staged / "toy.py")
+        (staged / ".gitignore").write_text("project.yaml\n__pycache__/\n*.pyc\n")
+        git(staged, "init", "-b", "main")
+        git(staged, "config", "user.name", "Vloop Toy Example")
+        git(staged, "config", "user.email", "toy@example.invalid")
+        git(staged, "add", "src", "toy.py", ".gitignore")
+        git(staged, "commit", "-qm", "Snapshot code for Penn-Fudan toy iteration")
+        cfg.image_dir.mkdir(exist_ok=True)
+        data = cfg.to_dict()
+        data.pop("config_path")
+        (staged / "project.yaml").write_text(yaml.safe_dump(data))
+        staged.rename(root)
     return cfg, manifest
 
 

@@ -19,6 +19,8 @@ def test_session_shutdown_only_arms_timer_for_owned_server(monkeypatch, owned):
         "fiftyone.core.session",
         SimpleNamespace(session=SimpleNamespace(_server_services=services)),
     )
+    # All processes are doubles; this unit test does not need psutil installed.
+    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(NoSuchProcess=ProcessLookupError))
     timer = Mock()
     factory = Mock(return_value=timer)
     monkeypatch.setattr(module.threading, "Timer", factory)
@@ -32,6 +34,7 @@ def test_session_shutdown_only_arms_timer_for_owned_server(monkeypatch, owned):
         assert delay == 5
         child.kill.assert_not_called()
         worker.kill.assert_not_called()
+        worker.kill.side_effect = ProcessLookupError  # Worker already exited.
         force_close()  # Simulate only this server exceeding its shutdown deadline.
         child.kill.assert_called_once_with()
         worker.kill.assert_called_once_with()

@@ -24,6 +24,12 @@ METADATA = {
 }
 
 
+@pytest.fixture(autouse=True)
+def metric_package_version(monkeypatch):
+    # These tests exercise geometry and fingerprints without starting FiftyOne.
+    monkeypatch.setattr("vloop.evaluation_data.version", {"fiftyone": "test-fiftyone"}.__getitem__)
+
+
 def output():
     mask = np.zeros((3, 13, 23), dtype=bool)
     mask[0, 1:9, 1:10] = True
@@ -113,6 +119,9 @@ def test_frozen_selection_and_comparison(project, tmp_path):
     )
     assert comparison_id(first, params) != comparison_id(limited, params)
     assert comparison_id(first, params) != comparison_id(first, {**params, "max_detections": 1})
+    assert comparison_id(first, params) != comparison_id(
+        first, {**params, "fiftyone_version": "different-version"}
+    )
     changed = copy.deepcopy(first)
     changed["classes"][0]["name"] = "different"
     assert comparison_id(first, params) != comparison_id(changed, params)

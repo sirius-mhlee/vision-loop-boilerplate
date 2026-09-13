@@ -30,10 +30,14 @@ python examples/pennfudan_toy.py
 ```
 
 다운로드와 실행 결과는 지정한 `--workspace`에 남으며 새 clone에는 포함되지 않습니다.
+최초 준비는 임시 폴더에서 소스 복사·Git 커밋·설정 작성을 마친 뒤 `repo`로 옮깁니다.
+이 준비 과정에서 실패하거나 중단되면 같은 명령으로 다시 준비할 수 있습니다.
 같은 예제 명령을 다시 실행하면
 `progress.json`에 완료된 단계는 건너뜁니다. 실패 원인을 해결한 뒤 다시 실행할 수도 있지만,
 완료 기록을 저장하기 직전에 강제 종료했다면 생성된 작업·릴리스 상태를 먼저 확인해야 합니다.
 이 스크립트의 단계 건너뛰기는 개별 `vloop --resume` 기능과 별개입니다.
+같은 workspace는 처음 저장한 코드와 설정을 재사용합니다. 수정한 코드·설정을 검증하려면
+새 `--workspace`를 지정하고 그 폴더의 `source/PennFudanPed.zip`에 ZIP을 준비합니다.
 
 원래 `project.yaml`은 변경하지 않습니다. 예제는 별도 YAML과 소스 스냅샷이 있는 작은 Git
 저장소를 `.vloop/toy-pennfudan/repo`에 만들고 여기에 `dataset/v001`, `dataset/v002` 태그를
