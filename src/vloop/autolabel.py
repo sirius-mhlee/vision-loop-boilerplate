@@ -7,6 +7,7 @@ from contextlib import ExitStack, closing
 from pathlib import Path
 
 from .config import Config, config_from_dict
+from .progress import Progress
 from .runtime import cli_command, finish_run, project_lock, sha256_file, start_run, write_json
 from .sam3 import Sam3Labeler, model_identity
 
@@ -17,16 +18,18 @@ def _open_job(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def _input_digest(connection: sqlite3.Connection) -> str:
+def _input_digest(connection: sqlite3.Connection, progress, total) -> str:
+    progress.phase("vloop autolabel: checking input manifest", total=total)
     digest = hashlib.sha256()
     for row in connection.execute(
         "SELECT image_id, filepath, width, height, managed_sha256 FROM images ORDER BY image_id"
     ):
         digest.update((json.dumps(list(row), ensure_ascii=False) + "\n").encode())
+        progress.update()
     return digest.hexdigest()
 
 
-def _snapshot(cfg: Config, directory: Path, limit: int | None) -> None:
+def _snapshot(cfg: Config, directory: Path, limit: int | None, progress) -> None:
     catalog = cfg.storage_dir / "catalog.sqlite3"
     if not catalog.is_file():
         raise ValueError("No registered images; run vloop ingest first")
@@ -41,6 +44,7 @@ def _snapshot(cfg: Config, directory: Path, limit: int | None) -> None:
             CREATE INDEX images_status ON images(status);
         """)
         with closing(sqlite3.connect(f"{catalog.as_uri()}?mode=ro", uri=True)) as source, job:
+            progress.phase("vloop autolabel: preparing inputs")
             for row in source.execute(
                 "SELECT image_id, filepath, width, height, managed_sha256 "
                 "FROM images ORDER BY image_id LIMIT ?",
@@ -51,15 +55,19 @@ def _snapshot(cfg: Config, directory: Path, limit: int | None) -> None:
                     "VALUES (?, ?, ?, ?, ?)",
                     row,
                 )
-        if not job.execute("SELECT COUNT(*) FROM images").fetchone()[0]:
+                progress.update()
+        total = job.execute("SELECT COUNT(*) FROM images").fetchone()[0]
+        if not total:
             raise ValueError("No registered images; run vloop ingest first")
+        progress.phase("vloop autolabel: checking model", unit="step")
+        identity = model_identity(cfg)
         write_json(
             directory / "manifest.json",
             {
                 "schema_version": 1,
-                "model": model_identity(cfg),
+                "model": identity,
                 "config_sha256": sha256_file(directory / "config.json"),
-                "inputs_sha256": _input_digest(job),
+                "inputs_sha256": _input_digest(job, progress, total),
             },
         )
 
@@ -128,14 +136,14 @@ def autolabel(cfg: Config, *, resume: str | None = None, limit: int | None = Non
         limit is not None or not re.fullmatch(r"autolabel_\d{8}T\d{6}_[0-9a-f]{8}", resume)
     ):
         raise ValueError("Use an autolabel job ID without --limit when resuming")
-    with project_lock(cfg):
+    with project_lock(cfg), Progress("vloop autolabel: preparing") as progress:
         if resume is None:
             if not cfg.classes:
                 raise ValueError("Set classes before starting auto-labeling")
             directory, report = start_run(cfg, "autolabel")
             report.update(attempt=1, prediction_field=f"pred_{report['job_id']}")
             try:
-                _snapshot(cfg, directory, limit)
+                _snapshot(cfg, directory, limit, progress)
             except KeyboardInterrupt:
                 report.update(
                     status="interrupted",
@@ -184,20 +192,34 @@ def autolabel(cfg: Config, *, resume: str | None = None, limit: int | None = Non
                 closing(_open_job(directory / "samples.sqlite3")) as connection,
                 ExitStack() as stack,
             ):
-                if _input_digest(connection) != manifest["inputs_sha256"]:
+                report.update(_counts(connection))
+                if (
+                    _input_digest(connection, progress, report["total"])
+                    != manifest["inputs_sha256"]
+                ):
                     raise ValueError("Frozen input manifest was modified")
+                progress.phase("vloop autolabel: checking saved results", total=report["completed"])
                 for row in connection.execute("SELECT * FROM images WHERE status = 'completed'"):
                     path = directory / "predictions" / f"{row['image_id']}.json"
                     if sha256_file(path) != row["result_sha256"]:
                         raise ValueError(f"Completed result was modified: {path}")
-                report.update(_counts(connection))
+                    progress.update()
                 if report["completed"] != report["total"]:
+                    progress.phase("vloop autolabel: checking model", unit="step")
                     if model_identity(frozen) != manifest["model"]:
                         raise ValueError(
                             "Model, weights, adapter, or dependencies changed; start a new job"
                         )
+                    progress.status("vloop autolabel: opening FiftyOne")
                     store = PredictionStore(
                         frozen, report["prediction_field"], report["job_id"], manifest
+                    )
+                    progress.phase(
+                        "vloop autolabel: labeling",
+                        total=report["total"],
+                        initial=report["completed"],
+                        failed=report["failed"],
+                        reused=0,
                     )
                     for row in connection.execute(
                         "SELECT * FROM images WHERE status != 'completed' ORDER BY image_id"
@@ -223,8 +245,10 @@ def autolabel(cfg: Config, *, resume: str | None = None, limit: int | None = Non
                             else:
                                 if labeler is None:
                                     loading_model = True
+                                    progress.status("vloop autolabel: loading SAM 3")
                                     labeler = stack.enter_context(Sam3Labeler(frozen))
                                     loading_model = False
+                                    progress.status("vloop autolabel: labeling")
                                 prediction = labeler.predict(image)
                                 prediction.update(
                                     job_id=report["job_id"], image_path=image["filepath"]
@@ -270,6 +294,10 @@ def autolabel(cfg: Config, *, resume: str | None = None, limit: int | None = Non
                             report[status] += 1
                             report["empty"] += int(status == "completed" and object_count == 0)
                             write_json(directory / "report.json", report)
+                            if status in ("completed", "failed"):
+                                progress.update(
+                                    failed=report["failed"], reused=report["reused_results"]
+                                )
                 report["status"] = (
                     "completed" if report["completed"] == report["total"] else "failed"
                 )

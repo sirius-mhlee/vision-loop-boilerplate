@@ -5,6 +5,7 @@ import re
 from types import SimpleNamespace
 
 from .approval import approved_annotation
+from .progress import Progress
 from .review import _transition, load_review_dataset
 from .runtime import cli_command, finish_run, project_lock, start_run, write_json
 
@@ -22,7 +23,10 @@ def review_audit(cfg, *, resume=None):
             raise ValueError("Audit initialization was not completed; start a new review-audit job")
     else:
         directory, report = start_run(cfg, "review_audit")
-    with project_lock(SimpleNamespace(storage_dir=directory)):
+    with (
+        project_lock(SimpleNamespace(storage_dir=directory)),
+        Progress("vloop review-audit: preparing") as progress,
+    ):
         snapshot = json.loads((directory / "config.json").read_text())
         if snapshot["dataset_name"] != cfg.dataset_name or snapshot["storage_dir"] != str(
             cfg.storage_dir
@@ -38,6 +42,11 @@ def review_audit(cfg, *, resume=None):
                     after=None, upper=str(last["_id"]) if last else None, checked=0, invalidated=0
                 )
             write_json(directory / "report.json", report)
+            progress.phase(
+                "vloop review-audit: checking approvals",
+                initial=report["checked"],
+                invalidated=report["invalidated"],
+            )
             while report["upper"]:
                 query = {
                     "review_status": {"$in": ["completed", "auto_accepted"]},
@@ -63,12 +72,9 @@ def review_audit(cfg, *, resume=None):
                                 _transition(cfg, dataset, sample, "invalidate", "vloop", str(exc))
                                 report["invalidated"] += 1
                             report["checked"] += 1
+                            progress.update(invalidated=report["invalidated"])
                         report["after"] = str(row["_id"])
                     write_json(directory / "report.json", report)
-                print(
-                    f"Audit: {report['checked']} checked, {report['invalidated']} invalidated",
-                    flush=True,
-                )
             report["status"] = "completed"
         except KeyboardInterrupt:
             report.update(status="interrupted", error="Interrupted; resume this audit")

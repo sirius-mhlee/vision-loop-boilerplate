@@ -12,6 +12,7 @@ import tempfile
 from contextlib import closing, contextmanager
 from pathlib import Path
 
+from .progress import Progress
 from .release_data import connect, image_relative, verify_images
 from .runtime import sha256_file, write_json
 
@@ -195,7 +196,6 @@ def materialize(cfg, snapshot, work):
 def _dvc_progress(description, total):
     """Replace DVC's nested bars with one terminal-only batch progress bar."""
     from dvc.ui import ui
-    from tqdm import tqdm
 
     # DVC and dvc-data gate their bars on these loggers. Keep other DVC loggers
     # unchanged so warnings/errors remain visible, and restore exact levels on exit.
@@ -209,9 +209,7 @@ def _dvc_progress(description, total):
         console.is_interactive = False
         for logger in loggers:
             logger.setLevel(logging.CRITICAL)
-        with tqdm(
-            total=total, desc=description, unit="batch", disable=None, dynamic_ncols=True
-        ) as bar:
+        with Progress(description, total=total, unit="batch") as bar:
             yield bar
     finally:
         console.is_interactive = interactive

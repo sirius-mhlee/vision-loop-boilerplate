@@ -124,3 +124,15 @@ def test_empty_input_is_not_a_success(project):
 def test_concurrent_project_operation_is_rejected(project):
     with project_lock(project), pytest.raises(RuntimeError, match="Another vloop"):
         ingest(project, local_only=True)
+
+
+def test_progress_counts_files_including_duplicates_and_failures(project, progress_bars):
+    path = project.image_dir / "image.png"
+    Image.new("RGB", (4, 2)).save(path)
+    shutil.copy2(path, project.image_dir / "duplicate.png")
+    (project.image_dir / "broken.jpg").write_bytes(b"invalid image")
+    report = ingest(project, local_only=True)
+    bar = progress_bars[-1]
+    assert (report["registered"], report["duplicate"], report["failed"]) == (1, 1, 1)
+    assert (bar.n, bar.total, bar.unit) == (3, None, "file")
+    assert "failed=1" in bar.postfix

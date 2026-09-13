@@ -8,6 +8,7 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 from .config import Config
+from .progress import Progress
 from .runtime import cli_command, finish_run, project_lock, sha256_file, start_run, write_json
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
@@ -100,7 +101,7 @@ def ingest(cfg: Config, *, local_only: bool = False) -> dict:
     errors = cfg.input_errors()
     if errors:
         raise ValueError("; ".join(errors))
-    with project_lock(cfg):
+    with project_lock(cfg), Progress("vloop ingest: registering files", unit="file") as progress:
         directory, report = start_run(cfg, "ingest")
         report.update(
             registered=0,
@@ -127,6 +128,12 @@ def ingest(cfg: Config, *, local_only: bool = False) -> dict:
                         log.write(json.dumps(item, ensure_ascii=False) + "\n")
                         log.flush()
                         write_json(directory / "report.json", report)
+                        progress.update(
+                            registered=report["registered"],
+                            duplicate=report["duplicate"],
+                            repaired=report["repaired"],
+                            failed=report["failed"],
+                        )
                 if (
                     sum(report[key] for key in ("registered", "duplicate", "repaired", "failed"))
                     == 0
@@ -135,7 +142,8 @@ def ingest(cfg: Config, *, local_only: bool = False) -> dict:
                 if not local_only:
                     from .fiftyone import sync_catalog
 
-                    report["synced"] = sync_catalog(cfg, connection)
+                    progress.phase("vloop ingest: opening FiftyOne")
+                    report["synced"] = sync_catalog(cfg, connection, progress)
                     report["sync_status"] = "completed"
             report["status"] = "failed" if report["failed"] else "completed"
         except KeyboardInterrupt:

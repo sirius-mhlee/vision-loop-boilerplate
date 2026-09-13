@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from unittest.mock import Mock
 
 import pytest
@@ -52,3 +53,35 @@ def test_audit_initialization_failure_records_a_non_resume_retry(project, collec
     assert report["status"] == "failed", report
     assert report["error"] == "Database unavailable"
     assert "--resume" not in report["retry"]
+
+
+def test_audit_progress_resumes_checked_count(project, collection, monkeypatch, progress_bars):
+    from bson import ObjectId
+
+    first, second = ObjectId(), ObjectId()
+
+    class Sample(dict):
+        def reload(self):
+            pass
+
+    class Dataset(dict):
+        _sample_collection = collection
+
+    dataset = Dataset({str(key): Sample(review_status="completed") for key in (first, second)})
+    monkeypatch.setattr(module, "load_review_dataset", lambda cfg: dataset)
+    monkeypatch.setattr(module, "approved_annotation", lambda *args, **kwargs: None)
+    collection.find_one.return_value = {"_id": second}
+    page = Mock()
+    page.sort.return_value.limit.return_value = [{"_id": first}]
+    collection.find.side_effect = [page, KeyboardInterrupt()]
+    cfg = replace(project, review_audit_batch_size=1)
+    report = module.review_audit(cfg)
+    assert report["status"] == "interrupted"
+    assert (progress_bars[-1].n, progress_bars[-1].total) == (1, None)
+    next_page, end = Mock(), Mock()
+    next_page.sort.return_value.limit.return_value = [{"_id": second}]
+    end.sort.return_value.limit.return_value = []
+    collection.find.side_effect = [next_page, end]
+    resumed = module.review_audit(cfg, resume=report["job_id"])
+    assert resumed["status"] == "completed"
+    assert (progress_bars[-1].initial, progress_bars[-1].n) == (1, 2)

@@ -179,7 +179,7 @@ def test_invalid_selection_rejected(project, resume, limit):
 
 
 def test_interruption_during_snapshot_has_actionable_recovery(project, backend, monkeypatch):
-    def interrupt(cfg, directory, limit):
+    def interrupt(cfg, directory, limit, progress):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(module, "_snapshot", interrupt)
@@ -212,3 +212,30 @@ def test_progress_counts_do_not_rescan_all_images_per_prediction(project, backen
     report = module.autolabel(project)
     assert report["completed"] == report["empty"] == report["total"] == 3
     assert sum("GROUP BY status" in query for query in queries) == 1
+
+
+def test_progress_resumes_frozen_limit_without_counting_interrupted_image(
+    project, backend, progress_bars
+):
+    backend["interrupt_at"] = 2
+    report = module.autolabel(project, limit=2)
+    labeling = [bar for bar in progress_bars if bar.desc == "vloop autolabel: labeling"][-1]
+    assert report["status"] == "interrupted"
+    assert (labeling.n, labeling.total) == (1, 2)
+    backend["interrupt_at"] = None
+    resumed = module.autolabel(project, resume=report["job_id"])
+    labeling = [bar for bar in progress_bars if bar.desc == "vloop autolabel: labeling"][-1]
+    assert resumed["status"] == "completed"
+    assert (labeling.initial, labeling.n, labeling.total) == (1, 2, 2)
+
+
+def test_progress_counts_failed_attempts_and_reused_predictions(project, backend, progress_bars):
+    backend["store_error"] = True
+    report = module.autolabel(project)
+    labeling = progress_bars[-1]
+    assert report["failed"] == labeling.n == labeling.total == 3
+    assert "failed=3" in labeling.postfix
+    backend["store_error"] = False
+    resumed = module.autolabel(project, resume=report["job_id"])
+    assert resumed["reused_results"] == progress_bars[-1].n == 3
+    assert "reused=3" in progress_bars[-1].postfix

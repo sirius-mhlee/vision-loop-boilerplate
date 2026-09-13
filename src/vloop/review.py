@@ -10,6 +10,7 @@ from .approval import annotation_content, approved_annotation, content_hash, rec
 from .config import config_from_dict
 from .fiftyone import configure_fiftyone
 from .labels import to_detections
+from .progress import Progress
 from .runtime import finish_run, project_lock, sha256_file, start_run, write_json
 
 STATUSES = {
@@ -251,7 +252,7 @@ def change_reviews(cfg, sample_ids, action, reviewer, *, note="", confirm_empty=
         return result
 
 
-def audit_changed_reviews(cfg, dataset):
+def audit_changed_reviews(cfg, dataset, progress=None):
     """Follow indexed modification timestamps; never rehash all approved images on a timer."""
     from bson import ObjectId
 
@@ -295,6 +296,8 @@ def audit_changed_reviews(cfg, dataset):
                         {"_id": row["_id"], "last_modified_at": row["last_modified_at"]},
                         {"$set": {"review_checked_at": row["last_modified_at"]}},
                     )
+            if progress is not None:
+                progress.update(invalidated=invalidated)
         if checked >= cfg.review_audit_batch_size:
             break
     rows.close()
@@ -340,7 +343,7 @@ def prepare_review(cfg, job_id=None, *, limit=None, queue=None):
     limit = cfg.review_prepare_limit if limit is None else limit
     if type(limit) is not int or limit < 1:
         raise ValueError("Review preparation limit must be positive")
-    with project_lock(cfg):
+    with project_lock(cfg), Progress("vloop review: opening FiftyOne") as progress:
         directory, report = start_run(cfg, "review")
         report.update(initialized=0, preserved=0, unavailable=0)
         try:
@@ -357,7 +360,8 @@ def prepare_review(cfg, job_id=None, *, limit=None, queue=None):
             report["source_job_id"] = job_id
             dataset.info["vloop_review_source_job"] = job_id
             dataset.save()
-            report["invalidated"] = audit_changed_reviews(cfg, dataset)
+            progress.phase("vloop review: checking changed approvals")
+            report["invalidated"] = audit_changed_reviews(cfg, dataset, progress)
             field = f"pred_{job_id}" if job_id else None
             query = {"review_initialized": {"$ne": True}}
             if field and not queue:
@@ -365,7 +369,12 @@ def prepare_review(cfg, job_id=None, *, limit=None, queue=None):
             if queue:
                 query["review_queue_reason"] = queue
             report.update(limit=limit, queue=queue)
-            for sample in dataset.match(query).sort_by("id").limit(limit):
+            view = dataset.match(query).sort_by("id").limit(limit)
+            progress.phase("vloop review: preparing labels", total=len(view))
+            for sample in progress.track(
+                view.iter_samples(progress=False),
+                stats=lambda: {k: report[k] for k in ("initialized", "preserved", "unavailable")},
+            ):
                 if (
                     sample["ground_truth"] is not None
                     or sample["review_initialized"]

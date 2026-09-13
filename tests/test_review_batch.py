@@ -1,10 +1,12 @@
 import math
 import sqlite3
+from contextlib import closing
 from dataclasses import replace
 
 import pytest
 
 from vloop.cli import parse_args
+from vloop.progress import Progress
 from vloop.review import change_reviews
 from vloop.review_batch import policy_decision, review_batch, sampling_key
 from vloop.review_store import connect_records, read_record, save_record
@@ -113,3 +115,50 @@ def test_manual_review_cannot_materialize_a_million_selected_ids(project):
     with pytest.raises(ValueError, match="100 images"):
         change_reviews(project, ids(), "complete", "test")
     assert consumed == 101
+
+
+def test_batch_progress_resumes_preview_and_counts_failed_or_skipped_apply(
+    project, tmp_path, monkeypatch, progress_bars
+):
+    import vloop.review_batch as module
+
+    with closing(sqlite3.connect(":memory:")) as db:
+        db.row_factory = sqlite3.Row
+        db.executescript("""
+            CREATE TABLE inputs (sample_id TEXT PRIMARY KEY, decision TEXT, detail TEXT,
+                                 applied INTEGER DEFAULT 0, outcome TEXT);
+            INSERT INTO inputs (sample_id) VALUES ('first'), ('second');
+        """)
+        report = {"job_id": "progress-test"}
+
+        def inspect(cfg, dataset, row, policy):
+            if row["sample_id"] == "second":
+                raise KeyboardInterrupt
+            return None, None, None, "accept", ""
+
+        monkeypatch.setattr(module, "_inspect", inspect)
+
+        def process(apply):
+            with Progress("batch") as progress:
+                module._process(project, None, db, None, tmp_path, report, {}, 1, apply, progress)
+
+        with pytest.raises(KeyboardInterrupt):
+            process(False)
+        assert (progress_bars[-1].n, progress_bars[-1].total) == (1, 2)
+        monkeypatch.setattr(module, "_inspect", lambda *args: (None, None, None, "error", "bad"))
+        process(False)
+        bar = progress_bars[-1]
+        assert (bar.initial, bar.n, bar.total) == (1, 2, 2)
+        assert "errors=1" in bar.postfix
+
+        def fail(*args):
+            raise RuntimeError("Database update failed")
+
+        monkeypatch.setattr(module, "_apply_one", fail)
+        process(True)
+        assert (progress_bars[-1].n, progress_bars[-1].total) == (2, 2)
+        assert "failed=1" in progress_bars[-1].postfix
+        assert "skipped=1" in progress_bars[-1].postfix
+        process(True)  # Already attempted entries are not applied twice.
+        assert progress_bars[-1].initial == progress_bars[-1].n == 2
+        assert "failed=1" in progress_bars[-1].postfix

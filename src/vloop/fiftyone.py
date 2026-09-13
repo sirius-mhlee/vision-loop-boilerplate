@@ -45,7 +45,7 @@ def configure_fiftyone(cfg: Config):
     return fo
 
 
-def sync_catalog(cfg: Config, connection: sqlite3.Connection) -> int:
+def sync_catalog(cfg: Config, connection: sqlite3.Connection, progress) -> int:
     fo = configure_fiftyone(cfg)
     dataset = (
         fo.load_dataset(cfg.dataset_name)
@@ -65,6 +65,8 @@ def sync_catalog(cfg: Config, connection: sqlite3.Connection) -> int:
         dataset.add_sample_field("image_id", fo.StringField)
     dataset.create_index("image_id", unique=True)
     dataset.save()
+    total = connection.execute("SELECT COUNT(*) FROM images").fetchone()[0]
+    progress.phase("vloop ingest: syncing FiftyOne", total=total)
     synced = 0
     for row in connection.execute("SELECT * FROM images ORDER BY image_id"):
         filepath = Path(row["filepath"])
@@ -93,4 +95,5 @@ def sync_catalog(cfg: Config, connection: sqlite3.Connection) -> int:
             )
             dataset.add_sample(sample)
         synced += 1
+        progress.update()
     return synced

@@ -14,6 +14,7 @@ from uuid import uuid4
 from .approval import annotation_content, content_hash
 from .config import config_from_dict
 from .labels import to_detections
+from .progress import Progress
 from .review import _save_change, ensure_review_schema, load_review_dataset
 from .review_store import connect_records, save_record
 from .runtime import cli_command, finish_run, project_lock, sha256_file, start_run, write_json
@@ -59,16 +60,18 @@ def _connect(path):
     return connection
 
 
-def _digest(connection):
+def _digest(connection, progress):
+    progress.phase("vloop review-batch: checking input manifest")
     digest = hashlib.sha256()
     for row in connection.execute(
         "SELECT sample_id, image_id, prediction_sha256, revision FROM inputs ORDER BY sample_id"
     ):
         digest.update((json.dumps(list(row)) + "\n").encode())
+        progress.update()
     return digest.hexdigest()
 
 
-def _snapshot(dataset, connection, field, limit):
+def _snapshot(dataset, connection, field, limit, progress=None):
     connection.executescript("""
         CREATE TABLE inputs (
             sample_id TEXT PRIMARY KEY, image_id TEXT NOT NULL,
@@ -100,6 +103,8 @@ def _snapshot(dataset, connection, field, limit):
                         row["last_modified_at"].isoformat(),
                     ),
                 )
+                if progress is not None:
+                    progress.update()
     finally:
         cursor.close()
 
@@ -261,8 +266,23 @@ def _counts(connection):
     }
 
 
-def _process(cfg, dataset, connection, records, directory, report, policy, batch_size, apply):
+def _process(
+    cfg, dataset, connection, records, directory, report, policy, batch_size, apply, progress
+):
     report.update(_counts(connection))
+    progress.phase(
+        "vloop review-batch: applying" if apply else "vloop review-batch: previewing",
+        total=report["total"],
+        initial=report["applied"] if apply else report["total"] - report["pending_preview"],
+        **(
+            {
+                "failed": report["outcomes"].get("failed", 0),
+                "skipped": report["outcomes"].get("skipped", 0),
+            }
+            if apply
+            else {"errors": report["decisions"]["error"]}
+        ),
+    )
     while True:
         query = (
             "SELECT * FROM inputs WHERE "
@@ -293,6 +313,10 @@ def _process(cfg, dataset, connection, records, directory, report, policy, batch
                         )
                     report["applied"] += 1
                     report["outcomes"][outcome] = report["outcomes"].get(outcome, 0) + 1
+                    progress.update(
+                        failed=report["outcomes"].get("failed", 0),
+                        skipped=report["outcomes"].get("skipped", 0),
+                    )
                 else:
                     try:
                         _, _, _, decision, detail = _inspect(cfg, dataset, row, policy)
@@ -304,14 +328,9 @@ def _process(cfg, dataset, connection, records, directory, report, policy, batch
                     )
                     report["decisions"][decision] += 1
                     report["pending_preview"] -= 1
+                    progress.update(errors=report["decisions"]["error"])
             connection.commit()
         write_json(directory / "report.json", report)
-        print(
-            f"Batch {report['job_id']}: "
-            f"preview {report['total'] - report['pending_preview']}/{report['total']}, "
-            f"applied {report['applied']}/{report['total']}",
-            flush=True,
-        )
 
 
 def review_batch(
@@ -352,7 +371,10 @@ def review_batch(
             raise ValueError("actor is required for automatic adoption provenance")
         directory, report = start_run(cfg, "review_batch")
     # Separate lock avoids two processes resuming the same job, without holding the project lock.
-    with project_lock(SimpleNamespace(storage_dir=directory)):
+    with (
+        project_lock(SimpleNamespace(storage_dir=directory)),
+        Progress("vloop review-batch: preparing") as progress,
+    ):
         if resume:
             report = json.loads((directory / "report.json").read_text())
         report.update(status="running", mode="apply" if apply else "preview")
@@ -378,14 +400,15 @@ def review_batch(
                         "empty": "manual_review",
                         "source_manifest_hash": content_hash(manifest),
                     }
-                    _snapshot(dataset, connection, f"pred_{job_id}", limit)
+                    progress.phase("vloop review-batch: collecting candidates")
+                    _snapshot(dataset, connection, f"pred_{job_id}", limit, progress)
                     write_json(
                         directory / "manifest.json",
                         {
                             "schema_version": 1,
                             "implementation": _implementation(),
                             "policy": policy,
-                            "inputs_sha256": _digest(connection),
+                            "inputs_sha256": _digest(connection, progress),
                             "config_sha256": sha256_file(directory / "config.json"),
                         },
                     )
@@ -398,7 +421,7 @@ def review_batch(
                     raise ValueError("Batch implementation changed; create a new preview")
                 if manifest["config_sha256"] != sha256_file(directory / "config.json") or manifest[
                     "inputs_sha256"
-                ] != _digest(connection):
+                ] != _digest(connection, progress):
                     raise ValueError("Frozen batch configuration or inputs were modified")
                 snapshot = json.loads((directory / "config.json").read_text())
                 frozen = config_from_dict(snapshot, Path(snapshot.pop("config_path")))
@@ -430,6 +453,7 @@ def review_batch(
                         policy,
                         batch_size,
                         apply,
+                        progress,
                     )
                 report["status"] = "completed" if apply else "ready"
                 if apply and report["outcomes"].get("failed", 0):
