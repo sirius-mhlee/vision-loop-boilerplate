@@ -690,6 +690,13 @@ vloop restore --version v001
 릴리스 생성 작업을 이어가거나 새 버전 번호를 만들지 않습니다. 현재 Git checkout과
 FiftyOne DB를 유지하고, 복원된 라벨을 FiftyOne에 등록하지 않습니다.
 
+`release`(재개 포함)와 `restore`의 DVC 처리 중에는 세부 진행률 대신 vloop 전체 진행률
+하나를 표시합니다. `train`·`evaluate` 내부의 복원에도 동일하게 적용합니다. 표시 단위인
+`batch`는 이미지 한 장이 아니라 DVC로 추적하는 폴더 묶음이며, 100%는 해당 DVC 처리의
+완료를 뜻합니다. 이후의 무결성 검증·태그 생성까지 포함한 작업 성공 여부는 최종 결과를
+확인합니다. 진행률 출력 대상인 표준 오류(`stderr`)가 터미널이 아니면 진행률은 생략합니다.
+경고·오류 출력은 유지합니다.
+
 준비 결과는 작업 폴더의 `report.json`과 `dvc-work/dataset/metadata/summary.json`에 있습니다.
 `snapshot.sqlite3`의 `records`에 포함 이미지·정답·승인 기록·검수 이력·출처·split이 있고,
 `held_reason`이 있는 행은 보류한 이미지입니다. `summary.held_reasons`에 사유별 건수를

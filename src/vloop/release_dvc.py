@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -190,6 +191,34 @@ def materialize(cfg, snapshot, work):
     return stats
 
 
+@contextmanager
+def _dvc_progress(description, total):
+    """Replace DVC's nested bars with one terminal-only batch progress bar."""
+    from dvc.ui import ui
+    from tqdm import tqdm
+
+    # DVC and dvc-data gate their bars on these loggers. Keep other DVC loggers
+    # unchanged so warnings/errors remain visible, and restore exact levels on exit.
+    loggers = [logging.getLogger(name) for name in ("dvc.progress", "dvc_data.callbacks")]
+    levels = [logger.level for logger in loggers]
+    console = ui.error_console
+    interactive = console.is_interactive
+    try:
+        # Repo.add also uses Rich status spinners, independently of tqdm's loggers.
+        # Their cursor movement breaks our line; disable live rendering, not messages.
+        console.is_interactive = False
+        for logger in loggers:
+            logger.setLevel(logging.CRITICAL)
+        with tqdm(
+            total=total, desc=description, unit="batch", disable=None, dynamic_ncols=True
+        ) as bar:
+            yield bar
+    finally:
+        console.is_interactive = interactive
+        for logger, level in zip(loggers, levels):
+            logger.setLevel(level)
+
+
 def add_and_push(cfg, work, progress=None):
     """At most one hash-prefix shard is loaded by DVC at a time."""
     targets = LABEL_TARGETS + [
@@ -197,7 +226,10 @@ def add_and_push(cfg, work, progress=None):
         for p in sorted((work / "dataset/images").iterdir())
         if p.is_dir()
     ]
-    with dvc_repo(cfg, work) as repo:
+    with (
+        _dvc_progress("vloop release: DVC", len(targets)) as bar,
+        dvc_repo(cfg, work) as repo,
+    ):
         for index, target in enumerate(targets):
             absolute = str(work / target)
             repo.add(absolute)
@@ -209,6 +241,7 @@ def add_and_push(cfg, work, progress=None):
                     _safe_link(path, cfg.storage_dir / "releases/pool" / relative)
             if progress:
                 progress(index + 1, len(targets))
+            bar.update(1)
     return [target + ".dvc" for target in targets]
 
 
@@ -298,9 +331,13 @@ def restore_data(cfg, version, *, metadata_only=False):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(content)
     targets = ["dataset/metadata.dvc"] if metadata_only else info["dvc_targets"]
-    with dvc_repo(cfg, work) as repo:
+    with (
+        _dvc_progress(f"vloop restore {version}: DVC", len(targets)) as bar,
+        dvc_repo(cfg, work) as repo,
+    ):
         for target in targets:
             repo.pull(targets=[str(work / target)], jobs=4, remote="release")
+            bar.update(1)
     snapshot = work / "dataset/metadata/snapshot.sqlite3"
     if sha256_file(snapshot) != info["snapshot_sha256"]:
         raise ValueError("Restored snapshot checksum mismatch")
